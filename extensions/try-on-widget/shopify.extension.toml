@@ -1,0 +1,23 @@
+name = "try-on-widget"
+handle = "try-on-widget"
+uid = "a9abfcc3-b879-ddaf-269f-945459adb64d416252b7"
+type = "theme"
+
+[settings]
+  [[settings.fields]]
+    key = "app_url"
+    type = "text"
+    label = "App URL"
+    default = ""
+
+  [[settings.fields]]
+    key = "cta_text"
+    type = "text"
+    label = "Button text"
+    default = "Try On"
+
+  [[settings.fields]]
+    key = "primary_color"
+    type = "text"
+    label = "Primary color (hex)"
+    default = "#6366f1"

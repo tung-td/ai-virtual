@@ -1,0 +1,10 @@
+/**
+ * try-on-widget.css
+ * Minimal host-level styles for the widget root container.
+ * All widget styles are scoped inside Shadow DOM via try-on-widget.js.
+ */
+#ai-tryon-widget-root {
+  display: block;
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
