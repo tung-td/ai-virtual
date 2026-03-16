@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   Page,
   Layout,
@@ -8,24 +8,31 @@ import {
   ProgressBar,
   Button,
   Banner,
+  SkeletonDisplayText,
   SkeletonBodyText,
-  Divider,
   Box,
   BlockStack,
   InlineStack,
   InlineGrid,
+  Divider,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { useNavigate } from "react-router-dom";
 import { useApi } from "../utils/api";
 
-const PLAN_BADGE_MAP = {
+const PLAN_BADGE_TONE = {
   free: "info",
   starter: "success",
   growth: "success",
   scale: "warning",
   pro: "attention",
-  enterprise: "new",
+  enterprise: "magic",
+};
+
+const ENGINE_META = {
+  premium: { label: "Premium (fashn.ai)", tone: "success" },
+  community: { label: "Community (IDM-VTON)", tone: "warning" },
+  mock: { label: "Mock Mode", tone: "subdued" },
 };
 
 export default function HomePage() {
@@ -38,6 +45,7 @@ export default function HomePage() {
   const loadSettings = useCallback(async () => {
     try {
       setLoading(true);
+      setError(null);
       const data = await api.get("/api/shop/settings");
       setSettings(data.settings);
     } catch (e) {
@@ -47,134 +55,203 @@ export default function HomePage() {
     }
   }, [api]);
 
-  useEffect(() => {
-    loadSettings();
-  }, [loadSettings]);
+  useEffect(() => { loadSettings(); }, [loadSettings]);
 
   const quotaUsed = settings?.quota?.used ?? 0;
   const quotaLimit = settings?.quota?.limit ?? 0;
-  const quotaPercent =
-    quotaLimit > 0 ? Math.min((quotaUsed / quotaLimit) * 100, 100) : 0;
+  const quotaPercent = useMemo(
+    () => (quotaLimit > 0 ? Math.min((quotaUsed / quotaLimit) * 100, 100) : 0),
+    [quotaUsed, quotaLimit]
+  );
   const remaining = settings?.quota?.remaining ?? 0;
   const planKey = settings?.plan ?? "free";
   const planName = planKey.charAt(0).toUpperCase() + planKey.slice(1);
+  const engineKey = settings?.ai_engine ?? "community";
+  const engine = ENGINE_META[engineKey] ?? ENGINE_META.community;
+
+  // Render Skeleton for a Metric Card
+  const renderMetricSkeleton = () => (
+    <BlockStack gap="200">
+      <SkeletonDisplayText size="small" />
+      <SkeletonBodyText lines={2} />
+    </BlockStack>
+  );
 
   return (
-    <Page>
+    <Page fullWidth>
       <TitleBar title="Dashboard" />
 
-      <BlockStack gap="400">
+      <BlockStack gap="500">
+        {/* Error State */}
         {error && (
           <Banner
             tone="critical"
-            title="Could not load data"
+            title="Failed to load dashboard data"
             onDismiss={() => setError(null)}
+            action={{ content: "Retry", onAction: loadSettings }}
           >
             <p>{error}</p>
           </Banner>
         )}
 
         <Layout>
-          {/* Quota Overview */}
+          {/* ─────────────────────────────────────────────────────────────
+              MAIN COLUMN: HERO AND GETTING STARTED (2/3 Width)
+              ───────────────────────────────────────────────────────────── */}
           <Layout.Section>
-            <Card>
-              <BlockStack gap="400">
-                <InlineStack align="space-between">
-                  <Text variant="headingMd" as="h2">
-                    Monthly Quota
-                  </Text>
-                  <Badge tone={PLAN_BADGE_MAP[planKey] ?? "info"}>
-                    {planName} Plan
-                  </Badge>
-                </InlineStack>
-
-                {loading ? (
-                  <SkeletonBodyText lines={3} />
-                ) : (
-                  <BlockStack gap="200">
-                    <ProgressBar
-                      progress={quotaPercent}
-                      tone={
-                        quotaPercent >= 90
-                          ? "critical"
-                          : quotaPercent >= 70
-                            ? "warning"
-                            : "highlight"
-                      }
-                      size="medium"
-                    />
-                    <InlineStack align="space-between">
-                      <Text variant="bodySm" tone="subdued">
-                        Used: <strong>{quotaUsed}</strong> / {quotaLimit}{" "}
-                        generations
-                      </Text>
-                      <Text variant="bodySm" tone="subdued">
-                        Remaining: <strong>{remaining}</strong>
-                      </Text>
-                    </InlineStack>
+            <BlockStack gap="500">
+              
+              {/* Modern Hero Banner */}
+              <Box 
+                padding="600" 
+                background="bg-surface-secondary" 
+                borderRadius="300" 
+                borderColor="border" 
+                borderWidth="025"
+                shadow="100"
+              >
+                <InlineStack align="space-between" blockAlign="center" wrap={false}>
+                  <BlockStack gap="400">
+                    <Text variant="heading2xl" as="h1">
+                      Welcome to Virtual Try-On
+                    </Text>
+                    <Text variant="bodyLg" tone="subdued">
+                      Increase your store conversions by allowing customers to instantly see how your clothing catalog looks on them.
+                    </Text>
+                    <Box paddingBlockStart="200">
+                      <Button variant="primary" size="large" onClick={() => navigate("/settings")}>
+                        Configure Application
+                      </Button>
+                    </Box>
                   </BlockStack>
-                )}
-              </BlockStack>
-            </Card>
-          </Layout.Section>
 
-          {/* Quick Stats Grid */}
-          <Layout.Section>
-            <InlineGrid columns={{ xs: 1, sm: 2, md: 3 }} gap="400">
-              <Card>
-                <BlockStack gap="100">
-                  <Text variant="headingLg" as="p" fontWeight="bold">
-                    {loading ? "—" : quotaUsed}
-                  </Text>
-                  <Text variant="bodySm" tone="subdued">
-                    Total Try-Ons (This Month)
-                  </Text>
-                </BlockStack>
-              </Card>
-              <Card>
-                <BlockStack gap="100">
-                  <Text variant="headingLg" as="p" fontWeight="bold">
-                    {loading ? "—" : remaining}
-                  </Text>
-                  <Text variant="bodySm" tone="subdued">
-                    Generations Remaining
-                  </Text>
-                </BlockStack>
-              </Card>
-              <Card>
-                <BlockStack gap="100">
-                  <Text variant="headingLg" as="p" fontWeight="bold">
-                    {loading ? "—" : planName}
-                  </Text>
-                  <Text variant="bodySm" tone="subdued">
-                    Active Plan
-                  </Text>
-                </BlockStack>
-              </Card>
-            </InlineGrid>
-          </Layout.Section>
-
-          {/* Quick Actions */}
-          <Layout.Section>
-            <Card>
-              <BlockStack gap="400">
-                <Text variant="headingMd" as="h2">
-                  Quick Actions
-                </Text>
-                <Divider />
-                <InlineStack gap="200">
-                  <Button
-                    variant="primary"
-                    onClick={() => navigate("/products")}
-                  >
-                    Manage Products
-                  </Button>
-                  <Button onClick={() => navigate("/settings")}>
-                    Widget Settings
-                  </Button>
+                  {/* Clean geometric shapes placeholder for modern feel */}
+                  <div style={{ paddingLeft: '40px', paddingRight: '20px', display: "none" }} className="md:block">
+                     <svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+                       <circle cx="60" cy="60" r="60" fill="#E4E5E7"/>
+                       <rect x="30" y="30" width="60" height="60" rx="12" fill="#FFFFFF"/>
+                     </svg>
+                  </div>
                 </InlineStack>
-              </BlockStack>
-            </Card>
+              </Box>
+
+              {/* Quick Setup Checklist */}
+              <Text variant="headingLg" as="h2">Getting Started Guide</Text>
+              
+              <InlineGrid columns={{ xs: 1, sm: 2 }} gap="400">
+                {/* Step 1 */}
+                <Card roundedAbove="sm">
+                  <BlockStack gap="300">
+                    <InlineStack align="space-between" blockAlign="center">
+                      <Badge tone="info">Step 1</Badge>
+                    </InlineStack>
+                    <Text variant="headingMd" as="h3">Activate Theme Extension</Text>
+                    <Text variant="bodyMd" tone="subdued">
+                      Enable the Virtual Try-On App Block in your active Shopify Theme Editor to make the widget visible on product pages.
+                    </Text>
+                    <Box paddingBlockStart="200">
+                      <Button variant="secondary" external url={`https://${window.shopify?.config?.shop}/admin/themes/current/editor?context=apps`}>
+                        Open Theme Editor
+                      </Button>
+                    </Box>
+                  </BlockStack>
+                </Card>
+
+                {/* Step 2 */}
+                <Card roundedAbove="sm">
+                  <BlockStack gap="300">
+                    <InlineStack align="space-between" blockAlign="center">
+                      <Badge tone="success">Step 2</Badge>
+                    </InlineStack>
+                    <Text variant="headingMd" as="h3">Configure Design</Text>
+                    <Text variant="bodyMd" tone="subdued">
+                      Adjust the button appearance, select the correct active AI Engine, and fine-tune your global configurations.
+                    </Text>
+                    <Box paddingBlockStart="200">
+                      <Button variant="secondary" onClick={() => navigate("/settings")}>
+                        Go to Settings
+                      </Button>
+                    </Box>
+                  </BlockStack>
+                </Card>
+              </InlineGrid>
+            </BlockStack>
+          </Layout.Section>
+
+          {/* ─────────────────────────────────────────────────────────────
+              SIDE COLUMN: USAGE AND PLAN INFO (1/3 Width)
+              ───────────────────────────────────────────────────────────── */}
+          <Layout.Section variant="oneThird">
+            <BlockStack gap="500">
+              
+              {/* Account Usage & Plan Details */}
+              <Card roundedAbove="sm">
+                <BlockStack gap="400">
+                  <InlineStack align="space-between" blockAlign="center">
+                    <Text variant="headingLg" as="h2">Account Usage</Text>
+                    <Badge tone={PLAN_BADGE_TONE[planKey] ?? "info"}>{planName} Plan</Badge>
+                  </InlineStack>
+                  <Divider />
+
+                  {loading ? (
+                    renderMetricSkeleton()
+                  ) : (
+                    <BlockStack gap="400">
+                      <BlockStack gap="100">
+                        <InlineStack align="space-between" blockAlign="center">
+                          <Text variant="bodyMd" fontWeight="medium">Generations Used</Text>
+                          <Text variant="bodyMd">{quotaUsed} / {quotaLimit}</Text>
+                        </InlineStack>
+                        <ProgressBar
+                          progress={quotaPercent}
+                          tone={quotaPercent >= 90 ? "critical" : quotaPercent >= 70 ? "warning" : "highlight"}
+                          size="small"
+                        />
+                      </BlockStack>
+
+                      <Divider />
+
+                      <BlockStack gap="200">
+                         <Text variant="bodySm" tone="subdued">
+                           You have <strong>{remaining}</strong> requests left this month.
+                         </Text>
+                         <InlineStack align="space-between" blockAlign="center">
+                           <Text variant="bodyMd" fontWeight="medium">Active AI Engine</Text>
+                           <Badge tone={engine.tone}>{engine.label}</Badge>
+                         </InlineStack>
+                      </BlockStack>
+
+                      {quotaPercent >= 80 && (
+                        <Box paddingBlockStart="200">
+                          <Banner
+                            tone={quotaPercent >= 90 ? "critical" : "warning"}
+                            title={quotaPercent >= 90 ? "Quota Critical" : "Quota Low"}
+                          >
+                            <p>Upgrade to avoid disruptions.</p>
+                          </Banner>
+                        </Box>
+                      )}
+                    </BlockStack>
+                  )}
+                </BlockStack>
+              </Card>
+
+              {/* Need Help Card */}
+              <Box background="bg-surface-secondary" padding="400" borderRadius="200" borderWidth="025" borderColor="border">
+                <BlockStack gap="300">
+                  <Text variant="headingMd" as="h2">Platform Support</Text>
+                  <Text variant="bodyMd" tone="subdued">
+                    Read the official documentation to optimize your widget placement or contact technical support for custom integration help.
+                  </Text>
+                  <InlineStack gap="200">
+                    <Button variant="tertiary" external url="https://help.shopify.com">
+                      View Documentation
+                    </Button>
+                  </InlineStack>
+                </BlockStack>
+              </Box>
+
+            </BlockStack>
           </Layout.Section>
         </Layout>
       </BlockStack>

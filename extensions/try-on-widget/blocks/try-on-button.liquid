@@ -1,30 +1,20 @@
 {% comment %}
   try-on-button.liquid
   App Embed Block — renders the "Try On" button on product pages.
-  Only shows if ai_tryon.enabled metafield is "true".
 {% endcomment %}
 
-{% assign tryon_enabled = product.metafields.ai_tryon.enabled.value %}
-{% if tryon_enabled == true or request.design_mode %}
-  <div
-    id="ai-tryon-widget-root"
-    data-product-id="{{ product.id }}"
-    data-product-title="{{ product.title | escape }}"
-    data-garment-url="{{ product.featured_image | image_url: width: 1024 }}"
-    data-app-url="{{ block.settings.app_url | default: shop.metafields.ai_tryon.app_url }}"
-    data-shop-domain="{{ shop.domain }}"
-    data-cta-text="{{ block.settings.cta_text | default: 'Try On' }}"
-    data-primary-color="{{ block.settings.primary_color | default: '#6366f1' }}"
-    style="margin-top: 12px;"
-  ></div>
-  {{ 'try-on-widget.css' | asset_url | stylesheet_tag }}
-
-  {% if request.design_mode and tryon_enabled != true %}
-    <div style="font-size: 12px; color: #888; margin-top: 4px;">
-      ℹ️ App Block Preview: The AI Try-On feature is currently <strong>disabled</strong> for this specific product in
-      the Admin app.
-    </div>
-  {% endif %}
+<div
+  id="ai-tryon-widget-root"
+  data-product-id="{{ product.id }}"
+  data-product-title="{{ product.title | escape }}"
+  data-garment-url="{{ product.featured_image | image_url: width: 1024 }}"
+  data-app-url="{{ block.settings.app_url | default: shop.metafields.ai_tryon.app_url }}"
+  data-shop-domain="{{ shop.domain }}"
+  data-cta-text="{{ block.settings.cta_text | default: 'Try On' }}"
+  data-primary-color="{{ block.settings.primary_color | default: '#6366f1' }}"
+  style="margin-top: 12px;"
+></div>
+{{ 'try-on-widget.css' | asset_url | stylesheet_tag }}
 
   <script>
     (function () {
@@ -38,7 +28,6 @@
       document.body.appendChild(script);
     })();
   </script>
-{% endif %}
 
 {% schema %}
 {

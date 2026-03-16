@@ -20,7 +20,6 @@ export default function App() {
             <a href="/" rel="home">
               Dashboard
             </a>
-            <a href="/products">Products</a>
             <a href="/settings">Settings</a>
           </NavMenu>
           <Routes pages={pages} />

@@ -41,23 +41,30 @@ export const upload = multer({
 });
 
 /**
- * Helper — fetch garment image URL for a product via Shopify GraphQL.
- * Returns the featured image URL, or null if not found.
+ * Helper — fetch product data (image URL, title, tags) via Shopify GraphQL.
+ * Returns { imageUrl, title, tags } — all fields may be null/empty on failure.
  */
-async function getGarmentImageUrl(session, productId) {
+async function getProductData(session, productId) {
   try {
     const client = getGraphqlClient(session);
     const res = await client.request(
-      `query getProductImage($id: ID!) {
+      `query getProductData($id: ID!) {
         product(id: $id) {
+          title
+          tags
           featuredImage { url }
         }
       }`,
       { variables: { id: productId } },
     );
-    return res.data?.product?.featuredImage?.url ?? null;
+    const product = res.data?.product;
+    return {
+      imageUrl: product?.featuredImage?.url ?? null,
+      title: product?.title ?? "",
+      tags: product?.tags ?? [],
+    };
   } catch {
-    return null;
+    return { imageUrl: null, title: "", tags: [] };
   }
 }
 
@@ -94,8 +101,9 @@ export const submit = asyncHandler(async (req, res) => {
   // 2. Encode person photo to base64
   const personImageBase64 = req.file.buffer.toString("base64");
 
-  // 3. Resolve garment image URL from Shopify
-  const garmentImageUrl = await getGarmentImageUrl(session, product_id);
+  // 3. Resolve product data (image URL + title + tags) from Shopify
+  const { imageUrl: garmentImageUrl, title: productTitle, tags: productTags } =
+    await getProductData(session, product_id);
 
   // 4. Fetch shop config (AI Engine)
   const shopConfig = Shop.findByDomain(shopDomain);
@@ -114,7 +122,7 @@ export const submit = asyncHandler(async (req, res) => {
       TryOnJob.updateStatus(jobId, { status: "processing" });
 
       if (engine === "community") {
-        // Option 1: Community (Free - Hugging Face)
+        // Option 1: Community (Free - Hugging Face IDM-VTON)
         const { predictionId } = await submitFreeTryOn(
           personImageBase64,
           garmentImageUrl,
@@ -123,10 +131,13 @@ export const submit = asyncHandler(async (req, res) => {
         TryOnJob.setPredictionId(jobId, predictionId);
 
         // Run the blocking Gradio call in background
+        // Pass productTitle + productTags so IDM-VTON can build a rich prompt
         const result = await runOOTDiffusion(
           personImageBase64,
           garmentImageUrl,
           category,
+          productTitle,
+          productTags,
         );
         if (result.status === "completed") {
           TryOnJob.updateStatus(jobId, {
@@ -136,7 +147,7 @@ export const submit = asyncHandler(async (req, res) => {
           });
           Shop.incrementQuota(shopDomain);
         } else {
-          throw new Error(result.error || "OOTDiffusion failed");
+          throw new Error(result.error || "IDM-VTON failed");
         }
       } else {
         // Option 2: Premium (Paid - fashn.ai) or Mock
@@ -274,7 +285,8 @@ export const submitStorefront = asyncHandler(async (req, res) => {
   }
 
   const personImageBase64 = req.file.buffer.toString("base64");
-  const garmentImageUrl = await getGarmentImageUrl(session, product_id);
+  const { imageUrl: garmentImageUrl, title: productTitle, tags: productTags } =
+    await getProductData(session, product_id);
 
   const shopConfig = Shop.findByDomain(shopDomain);
   const engine = shopConfig?.ai_engine || "premium";
@@ -301,6 +313,8 @@ export const submitStorefront = asyncHandler(async (req, res) => {
           personImageBase64,
           garmentImageUrl,
           category,
+          productTitle,
+          productTags,
         );
         if (result.status === "completed") {
           TryOnJob.updateStatus(jobId, {
@@ -310,7 +324,7 @@ export const submitStorefront = asyncHandler(async (req, res) => {
           });
           Shop.incrementQuota(shopDomain);
         } else {
-          throw new Error(result.error || "OOTDiffusion failed");
+          throw new Error(result.error || "IDM-VTON failed");
         }
       } else {
         const { predictionId } = await submitTryOn(

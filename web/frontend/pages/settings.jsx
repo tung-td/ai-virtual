@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   Page,
   Layout,
@@ -6,67 +6,56 @@ import {
   Text,
   TextField,
   Select,
-  Button,
   Banner,
   SkeletonBodyText,
-  Divider,
+  SkeletonDisplayText,
   Box,
-  Badge,
   Checkbox,
   ColorPicker,
   BlockStack,
   InlineStack,
+  Divider,
   InlineGrid,
 } from "@shopify/polaris";
-import { TitleBar } from "@shopify/app-bridge-react";
+import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { useApi } from "../utils/api";
 
 const CATEGORY_OPTIONS = [
-  { label: "Auto-detect", value: "auto" },
-  { label: "Tops", value: "tops" },
-  { label: "Bottoms", value: "bottoms" },
-  { label: "One-pieces", value: "one-pieces" },
+  { label: "Auto-detect (Recommended)", value: "auto" },
+  { label: "Tops / Shirts / Jackets", value: "tops" },
+  { label: "Bottoms / Pants / Skirts", value: "bottoms" },
+  { label: "One-pieces / Dresses", value: "one-pieces" },
 ];
 
-// Local Color Conversion Utils
+const AI_ENGINE_OPTIONS = [
+  { label: "Premium Engine (fashn.ai)", value: "premium" },
+  { label: "Community Engine (HuggingFace)", value: "community" },
+  { label: "Development Mocking", value: "mock" },
+];
+
+/** --- HSB <-> HEX Helpers --- */
 function hsbToHex({ hue, saturation, brightness }) {
-  const s = saturation;
-  const v = brightness;
-  const c = v * s;
-  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
-  const m = v - c;
+  const s = saturation, v = brightness;
+  const c = v * s, x = c * (1 - Math.abs(((hue / 60) % 2) - 1)), m = v - c;
   let r, g, b;
-
-  if (hue >= 0 && hue < 60) [r, g, b] = [c, x, 0];
-  else if (hue >= 60 && hue < 120) [r, g, b] = [x, c, 0];
-  else if (hue >= 120 && hue < 180) [r, g, b] = [0, c, x];
-  else if (hue >= 180 && hue < 240) [r, g, b] = [0, x, c];
-  else if (hue >= 240 && hue < 300) [r, g, b] = [x, 0, c];
+  if (hue < 60) [r, g, b] = [c, x, 0];
+  else if (hue < 120) [r, g, b] = [x, c, 0];
+  else if (hue < 180) [r, g, b] = [0, c, x];
+  else if (hue < 240) [r, g, b] = [0, x, c];
+  else if (hue < 300) [r, g, b] = [x, 0, c];
   else [r, g, b] = [c, 0, x];
-
-  const toHex = (val) => {
-    const hex = Math.round((val + m) * 255).toString(16);
-    return hex.length === 1 ? "0" + hex : hex;
-  };
-
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  const h = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return `#${h(r)}${h(g)}${h(b)}`;
 }
 
 function hexToHsb(hex) {
-  const rgb = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  if (!rgb) return { hue: 0, saturation: 0, brightness: 0 };
-
-  const r = parseInt(rgb[1], 16) / 255;
-  const g = parseInt(rgb[2], 16) / 255;
-  const b = parseInt(rgb[3], 16) / 255;
-
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const d = max - min;
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!m) return { hue: 240, saturation: 0.67, brightness: 0.95 };
+  const r = parseInt(m[1], 16) / 255, g = parseInt(m[2], 16) / 255, b = parseInt(m[3], 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
   const s = max === 0 ? 0 : d / max;
   let h = 0;
-
-  if (max !== min) {
+  if (d !== 0) {
     if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
     else if (max === g) h = (b - r) / d + 2;
     else h = (r - g) / d + 4;
@@ -75,50 +64,76 @@ function hexToHsb(hex) {
   return { hue: h * 360, saturation: s, brightness: max };
 }
 
-function hexToHsbSafe(hex) {
-  try {
-    return hexToHsb(hex || "#6366f1");
-  } catch {
-    return { hue: 240, saturation: 0.67, brightness: 0.95 };
-  }
-}
-
 export default function SettingsPage() {
   const api = useApi();
-  const [settings, setSettings] = useState(null);
+  const shopify = useAppBridge();
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const [saved, setSaved] = useState(false);
 
-  // Widget config state
-  const [ctaText, setCtaText] = useState("Try On");
+  // Form states
+  const [globalEnable, setGlobalEnable] = useState(true);
+  const [ctaText, setCtaText] = useState("Virtual Try-On");
   const [category, setCategory] = useState("auto");
   const [aiEngine, setAiEngine] = useState("premium");
-  const [primaryColor, setPrimaryColor] = useState({
-    hue: 240,
-    saturation: 0.67,
-    brightness: 0.95,
-  });
+  const [primaryColor, setPrimaryColor] = useState({ hue: 240, saturation: 0.67, brightness: 0.95 });
   const [overageEnabled, setOverageEnabled] = useState(true);
+
+  // Tracking baseline for dirty/clean state
+  const savedRef = useRef(null);
+  const hexColor = useMemo(() => hsbToHex(primaryColor), [primaryColor]);
+
+  const isDirty = useMemo(() => {
+    if (!savedRef.current) return false;
+    const s = savedRef.current;
+    return (
+      globalEnable !== s.globalEnable ||
+      ctaText !== s.ctaText ||
+      category !== s.category ||
+      aiEngine !== s.aiEngine ||
+      overageEnabled !== s.overageEnabled ||
+      hexColor !== hsbToHex(s.primaryColor)
+    );
+  }, [globalEnable, ctaText, category, aiEngine, overageEnabled, primaryColor, hexColor]);
+
+  // Handle native SaveBar visibility purely via DOM for reliability with <ui-save-bar>
+  useEffect(() => {
+    const saveBarNode = document.getElementById("app-bridge-save-bar");
+    if (saveBarNode) {
+      if (isDirty) {
+        saveBarNode.show();
+      } else {
+        saveBarNode.hide();
+      }
+    }
+  }, [isDirty]);
 
   const loadSettings = useCallback(async () => {
     try {
       setLoading(true);
+      setError(null);
       const data = await api.get("/api/shop/settings");
       const s = data.settings;
-      setSettings(s);
-      setOverageEnabled(s.quota?.overage_enabled ?? true);
-      setAiEngine(s.ai_engine || "premium");
 
-      const cfg =
-        typeof s.widget_config === "string"
-          ? JSON.parse(s.widget_config || "{}")
-          : (s.widget_config ?? {});
+      const cfg = typeof s.widget_config === "string" ? JSON.parse(s.widget_config || "{}") : (s.widget_config ?? {});
 
-      setCtaText(cfg.cta_text ?? "Try On");
-      setCategory(cfg.default_category ?? "auto");
-      setPrimaryColor(hexToHsbSafe(cfg.primary_color));
+      const formState = {
+        globalEnable: cfg.global_enable ?? true,
+        ctaText: cfg.cta_text ?? "Virtual Try-On",
+        category: cfg.default_category ?? "auto",
+        aiEngine: s.ai_engine || "premium",
+        overageEnabled: s.quota?.overage_enabled ?? true,
+        primaryColor: hexToHsb(cfg.primary_color || "#6366f1"),
+      };
+
+      setGlobalEnable(formState.globalEnable);
+      setCtaText(formState.ctaText);
+      setCategory(formState.category);
+      setAiEngine(formState.aiEngine);
+      setOverageEnabled(formState.overageEnabled);
+      setPrimaryColor(formState.primaryColor);
+      savedRef.current = formState;
     } catch (e) {
       setError(e.message);
     } finally {
@@ -126,11 +141,9 @@ export default function SettingsPage() {
     }
   }, [api]);
 
-  useEffect(() => {
-    loadSettings();
-  }, [loadSettings]);
+  useEffect(() => { loadSettings(); }, [loadSettings]);
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     try {
       setSaving(true);
       setError(null);
@@ -138,219 +151,220 @@ export default function SettingsPage() {
         overage_enabled: overageEnabled,
         ai_engine: aiEngine,
         widget_config: {
+          global_enable: globalEnable,
           cta_text: ctaText,
           default_category: category,
-          primary_color: hsbToHex(primaryColor),
+          primary_color: hexColor,
         },
       });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
+      // Accept changes as new baseline
+      savedRef.current = { globalEnable, ctaText, category, aiEngine, overageEnabled, primaryColor };
+      // Force an update
+      setCtaText((v) => v);
+      shopify.toast.show("Configuration applied successfully");
+
+      const saveBarNode = document.getElementById("app-bridge-save-bar");
+      if (saveBarNode) saveBarNode.hide();
+
     } catch (e) {
       setError(e.message);
+      shopify.toast.show("Could not save settings: " + e.message, { isError: true });
     } finally {
       setSaving(false);
     }
-  };
+  }, [api, shopify, globalEnable, ctaText, category, aiEngine, overageEnabled, primaryColor, hexColor]);
+
+  const handleDiscard = useCallback(() => {
+    if (!savedRef.current) return;
+    const s = savedRef.current;
+    setGlobalEnable(s.globalEnable);
+    setCtaText(s.ctaText);
+    setCategory(s.category);
+    setAiEngine(s.aiEngine);
+    setOverageEnabled(s.overageEnabled);
+    setPrimaryColor(s.primaryColor);
+    
+    const saveBarNode = document.getElementById("app-bridge-save-bar");
+    if (saveBarNode) saveBarNode.hide();
+  }, []);
 
   return (
-    <Page
-      title="Settings"
-      primaryAction={{
-        content: "Save Changes",
-        onAction: handleSave,
-        loading: saving,
-      }}
-    >
+    <Page>
       <TitleBar title="Settings" />
 
-      <BlockStack gap="400">
+      {/* --- Native UI Component provided by Shopify App Bridge V4 --- */}
+      <ui-save-bar id="app-bridge-save-bar">
+        <button variant="primary" onClick={handleSave} disabled={saving}></button>
+        <button onClick={handleDiscard} disabled={saving}></button>
+      </ui-save-bar>
+
+      <BlockStack gap="500">
+        
         {error && (
-          <Banner
-            tone="critical"
-            title="Error"
-            onDismiss={() => setError(null)}
-          >
+          <Banner tone="critical" title="Save Error" onDismiss={() => setError(null)}>
             <p>{error}</p>
           </Banner>
         )}
-        {saved && (
-          <Banner
-            tone="success"
-            title="Success"
-            onDismiss={() => setSaved(false)}
-          >
-            <p>Settings saved successfully!</p>
-          </Banner>
-        )}
 
+        {/* ────────── SECTION 1: GLOBAL VISIBILITY ────────── */}
         <Layout>
-          {/* AI Engine & Plan info */}
-          <Layout.Section>
-            <BlockStack gap="400">
-              <Card>
+          <Layout.AnnotatedSection
+            title="Widget Visibility"
+            description="Control whether the Virtual Try-On widget appears on your storefront. Ensure the App Block is enabled in your Theme Editor."
+          >
+            <Card roundedAbove="sm">
+              {loading ? (
+                <BlockStack gap="200"><SkeletonBodyText lines={2} /></BlockStack>
+              ) : (
                 <BlockStack gap="400">
-                  <Text variant="headingMd" as="h2">
-                    Plan & AI Engine
-                  </Text>
-
-                  {loading ? (
-                    <SkeletonBodyText lines={2} />
-                  ) : (
-                    <InlineGrid columns={2} gap="400">
-                      <BlockStack gap="100">
-                        <Text variant="bodySm" tone="subdued">
-                          Current Plan
-                        </Text>
-                        <Badge tone="info">
-                          {settings?.plan?.charAt(0).toUpperCase() +
-                            settings?.plan?.slice(1)}
-                        </Badge>
-                      </BlockStack>
-                      <BlockStack gap="100">
-                        <Text variant="bodySm" tone="subdued">
-                          Monthly Quota
-                        </Text>
-                        <Text variant="bodyMd">
-                          {settings?.quota?.used} / {settings?.quota?.limit}{" "}
-                          generations
-                        </Text>
-                      </BlockStack>
-                    </InlineGrid>
+                  <Checkbox
+                    label="Enable Virtual Try-On globally"
+                    helpText="Shows the Try-On button on every product page automatically."
+                    checked={globalEnable}
+                    onChange={setGlobalEnable}
+                  />
+                  {!globalEnable && (
+                    <Box paddingBlockStart="200">
+                      <Banner tone="info" title="Widget is inactive">
+                        The Try-On button will be hidden from all your products.
+                      </Banner>
+                    </Box>
                   )}
+                </BlockStack>
+              )}
+            </Card>
+          </Layout.AnnotatedSection>
+        </Layout>
 
-                  <Divider />
+        <Divider />
 
+        {/* ────────── SECTION 2: AI PROVIDER SETUP ────────── */}
+        <Layout>
+          <Layout.AnnotatedSection
+            title="Processing Platform"
+            description="Select the engine that powers the Try-On feature. Premium runs quickly (~15s) with high consistency. Community operates on a shared free queue and may take minutes."
+          >
+            <Card roundedAbove="sm">
+              {loading ? (
+                <BlockStack gap="200">
+                  <SkeletonDisplayText size="small" />
+                  <SkeletonBodyText lines={2} />
+                </BlockStack>
+              ) : (
+                <BlockStack gap="500">
                   <Select
-                    label="AI Generation Engine"
-                    options={[
-                      {
-                        label: "Premium (fashn.ai) - Fast & Reliable",
-                        value: "premium",
-                      },
-                      {
-                        label: "Community (Hugging Face) - Free but Slow",
-                        value: "community",
-                      },
-                      {
-                        label: "Mock Mode - For UI testing only",
-                        value: "mock",
-                      },
-                    ]}
+                    label="Active AI Engine"
+                    options={AI_ENGINE_OPTIONS}
                     value={aiEngine}
                     onChange={setAiEngine}
-                    helpText="Choose your AI processing source. Community mode is free but may have significant wait times."
-                    disabled={loading}
                   />
-
+                  <Divider />
                   <Checkbox
-                    label="Allow over-quota generations (additional charges apply)"
+                    label="Allow over-quota usage billing"
+                    helpText="Generations beyond your monthly limit are billed automatically at your plan's standard overage rate to prevent feature interruption."
                     checked={overageEnabled}
                     onChange={setOverageEnabled}
-                    disabled={loading}
                   />
                 </BlockStack>
-              </Card>
+              )}
+            </Card>
+          </Layout.AnnotatedSection>
+        </Layout>
 
-              {/* Widget Appearance */}
-              <Card>
-                <BlockStack gap="400">
-                  <Text variant="headingMd" as="h2">
-                    Widget Appearance
-                  </Text>
-                  <Divider />
+        <Divider />
 
+        {/* ────────── SECTION 3: STOREFRONT DESIGNER ────────── */}
+        <Layout>
+          <Layout.AnnotatedSection
+            title="Storefront Designer"
+            description="Adapt the try-on button to blend perfectly with your existing Shopify theme."
+          >
+            <Card roundedAbove="sm">
+              {loading ? (
+                <BlockStack gap="200"><SkeletonBodyText lines={6} /></BlockStack>
+              ) : (
+                <BlockStack gap="500">
+                  
                   <TextField
-                    label="Try On button text"
+                    label="Call to action text"
                     value={ctaText}
                     onChange={setCtaText}
-                    autoComplete="off"
-                    helpText="Label displayed on the 'Try On' button in your product pages."
-                    disabled={loading}
+                    maxLength={32}
+                    showCharacterCount
                   />
 
                   <Select
-                    label="Default product category"
+                    label="Fallback Garment Category"
                     options={CATEGORY_OPTIONS}
                     value={category}
                     onChange={setCategory}
-                    helpText="Helps the AI identify the type of garment."
-                    disabled={loading}
+                    helpText="Used if the app cannot automatically detect the correct garment type from the product's Shopify tags."
                   />
 
-                  <BlockStack gap="200">
-                    <Text variant="bodyMd" as="label">
-                      Primary Brand Color
-                    </Text>
-                    <InlineStack gap="400" align="start">
-                      <Box
-                        borderColor="border"
-                        borderWidth="025"
-                        borderRadius="200"
-                        padding="0"
-                        overflowX="hidden"
-                        overflowY="hidden"
-                      >
-                        <ColorPicker
-                          onChange={setPrimaryColor}
-                          color={primaryColor}
-                        />
+                  {/* Modern Split Preview layout using Flex InlineGrid */}
+                  <BlockStack gap="300">
+                    <Text variant="bodyMd" as="label" fontWeight="medium">Brand Hex Color</Text>
+                    
+                    <InlineGrid columns={{ xs: 1, md: 2 }} gap="400" alignItems="start">
+                      
+                      {/* Left side: Actual color picker control */}
+                      <Box background="bg-surface-secondary" padding="400" borderRadius="200" borderColor="border" borderWidth="025">
+                         <BlockStack gap="400" align="center">
+                            <ColorPicker onChange={setPrimaryColor} color={primaryColor} />
+                            
+                            <InlineStack gap="300" blockAlign="center" wrap={false}>
+                              <div style={{ width: 24, height: 24, backgroundColor: hexColor, borderRadius: 4, border: "1px solid #C9CCCF" }} />
+                              <Text variant="bodyMd"><code>{hexColor}</code></Text>
+                            </InlineStack>
+                         </BlockStack>
                       </Box>
-                      <BlockStack gap="100">
-                        <div
-                          style={{
-                            width: "48px",
-                            height: "48px",
-                            borderRadius: "4px",
-                            backgroundColor: hsbToHex(primaryColor),
-                            border: "1px solid #ddd",
-                          }}
-                        />
-                        <Text variant="bodySm" tone="subdued">
-                          HEX: <code>{hsbToHex(primaryColor)}</code>
-                        </Text>
-                      </BlockStack>
-                    </InlineStack>
+                      
+                      {/* Right side: Storefront Preview Mockup */}
+                      <Box padding="400" borderRadius="200" background="bg-surface" shadow="100" borderColor="border" borderWidth="025">
+                        <BlockStack gap="400" align="center">
+                          <Text variant="bodySm" tone="subdued">Storefront Preview</Text>
+                          
+                          {/* Fake product card skeleton */}
+                          <div style={{ width: "100%", maxWidth: "280px", margin: "0 auto" }}>
+                            <BlockStack gap="300">
+                              <Box background="bg-surface-secondary" padding="600" borderRadius="100" />
+                              <SkeletonBodyText lines={2} />
+                              
+                              {/* The live button */}
+                              <button
+                                style={{
+                                  width: "100%",
+                                  padding: "12px 16px",
+                                  borderRadius: "4px",
+                                  backgroundColor: hexColor,
+                                  color: "#ffffff",
+                                  border: "none",
+                                  fontSize: "14px",
+                                  fontWeight: "500",
+                                  letterSpacing: "0.5px",
+                                  fontFamily: "inherit",
+                                  boxShadow: "0 1px 3px rgba(0,0,0,0.12)",
+                                  cursor: "not-allowed"
+                                }}
+                                disabled
+                              >
+                                {ctaText || "Virtual Try-On"}
+                              </button>
+                            </BlockStack>
+                          </div>
+                        </BlockStack>
+                      </Box>
+
+                    </InlineGrid>
                   </BlockStack>
                 </BlockStack>
-              </Card>
-            </BlockStack>
-          </Layout.Section>
-
-          {/* Sidebar Info/Tips */}
-          <Layout.Section variant="oneThird">
-            <BlockStack gap="400">
-              <Card>
-                <BlockStack gap="200">
-                  <Text variant="headingMd" as="h2">
-                    Need Help?
-                  </Text>
-                  <Text as="p" tone="subdued">
-                    Premium engine requires an API Key. Ensure your account is
-                    topped up.
-                  </Text>
-                  <Button
-                    variant="tertiary"
-                    url="https://app.fashn.ai"
-                    external
-                  >
-                    Go to Fashn.ai
-                  </Button>
-                </BlockStack>
-              </Card>
-              <Card>
-                <BlockStack gap="200">
-                  <Text variant="headingMd" as="h2">
-                    Widget Tips
-                  </Text>
-                  <Text as="p" tone="subdued">
-                    Choose a primary color that matches your theme's brand color
-                    for the best customer experience.
-                  </Text>
-                </BlockStack>
-              </Card>
-            </BlockStack>
-          </Layout.Section>
+              )}
+            </Card>
+          </Layout.AnnotatedSection>
         </Layout>
+
+        {/* Bottom spacer */}
+        <Box paddingBlockEnd="1600" />
       </BlockStack>
     </Page>
   );
