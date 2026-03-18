@@ -30,9 +30,7 @@ const PLAN_BADGE_TONE = {
 };
 
 const ENGINE_META = {
-  premium: { label: "Premium (fashn.ai)", tone: "success" },
-  community: { label: "Community (IDM-VTON)", tone: "warning" },
-  mock: { label: "Mock Mode", tone: "subdued" },
+  gemini: { label: "Gemini (Google AI)", tone: "magic" },
 };
 
 export default function HomePage() {
@@ -113,10 +111,10 @@ export default function HomePage() {
                 <InlineStack align="space-between" blockAlign="center" wrap={false}>
                   <BlockStack gap="400">
                     <Text variant="heading2xl" as="h1">
-                      Welcome to Virtual Try-On
+                      Welcome to Fitly ✨
                     </Text>
                     <Text variant="bodyLg" tone="subdued">
-                      Increase your store conversions by allowing customers to instantly see how your clothing catalog looks on them.
+                      Increase conversions by letting customers virtually try on your products — powered by Google Gemini AI.
                     </Text>
                     <Box paddingBlockStart="200">
                       <Button variant="primary" size="large" onClick={() => navigate("/settings")}>
@@ -145,9 +143,9 @@ export default function HomePage() {
                     <InlineStack align="space-between" blockAlign="center">
                       <Badge tone="info">Step 1</Badge>
                     </InlineStack>
-                    <Text variant="headingMd" as="h3">Activate Theme Extension</Text>
+                    <Text variant="headingMd" as="h3">Activate App Embed</Text>
                     <Text variant="bodyMd" tone="subdued">
-                      Enable the Virtual Try-On App Block in your active Shopify Theme Editor to make the widget visible on product pages.
+                      Enable the Fitly App Embed in your Theme Editor. The Try-On button will appear automatically below Add-to-Cart on every product page.
                     </Text>
                     <Box paddingBlockStart="200">
                       <Button variant="secondary" external url={`https://${window.shopify?.config?.shop}/admin/themes/current/editor?context=apps`}>
@@ -163,9 +161,9 @@ export default function HomePage() {
                     <InlineStack align="space-between" blockAlign="center">
                       <Badge tone="success">Step 2</Badge>
                     </InlineStack>
-                    <Text variant="headingMd" as="h3">Configure Design</Text>
+                    <Text variant="headingMd" as="h3">Configure Fitly</Text>
                     <Text variant="bodyMd" tone="subdued">
-                      Adjust the button appearance, select the correct active AI Engine, and fine-tune your global configurations.
+                      Customize the button look, tweak the Gemini generation prompt, and manage which products show the Try-On button.
                     </Text>
                     <Box paddingBlockStart="200">
                       <Button variant="secondary" onClick={() => navigate("/settings")}>
@@ -215,10 +213,10 @@ export default function HomePage() {
                          <Text variant="bodySm" tone="subdued">
                            You have <strong>{remaining}</strong> requests left this month.
                          </Text>
-                         <InlineStack align="space-between" blockAlign="center">
-                           <Text variant="bodyMd" fontWeight="medium">Active AI Engine</Text>
-                           <Badge tone={engine.tone}>{engine.label}</Badge>
-                         </InlineStack>
+                          <InlineStack align="space-between" blockAlign="center">
+                            <Text variant="bodyMd" fontWeight="medium">AI Engine</Text>
+                            <Badge tone="magic">Gemini (Google AI)</Badge>
+                          </InlineStack>
                       </BlockStack>
 
                       {quotaPercent >= 80 && (

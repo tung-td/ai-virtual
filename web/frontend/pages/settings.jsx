@@ -16,6 +16,7 @@ import {
   InlineStack,
   Divider,
   InlineGrid,
+  Button,
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { useApi } from "../utils/api";
@@ -27,11 +28,15 @@ const CATEGORY_OPTIONS = [
   { label: "One-pieces / Dresses", value: "one-pieces" },
 ];
 
-const AI_ENGINE_OPTIONS = [
-  { label: "Premium Engine (fashn.ai)", value: "premium" },
-  { label: "Community Engine (HuggingFace)", value: "community" },
-  { label: "Development Mocking", value: "mock" },
-];
+const DEFAULT_GEMINI_PROMPT =
+  "You are a professional photo editor. I will give you two images:\n" +
+  "1. A photo of a person (customer)\n" +
+  "2. A product/garment image\n\n" +
+  "Your task: Place the person wearing the garment in a clean, professional " +
+  "product store setting. The result should look photorealistic, " +
+  "well-lit, and suitable for an e-commerce product page. " +
+  "Keep the person's face, skin tone, and body proportions exactly the same. " +
+  "The garment should fit naturally on the person.";
 
 /** --- HSB <-> HEX Helpers --- */
 function hsbToHex({ hue, saturation, brightness }) {
@@ -53,7 +58,7 @@ function hexToHsb(hex) {
   if (!m) return { hue: 240, saturation: 0.67, brightness: 0.95 };
   const r = parseInt(m[1], 16) / 255, g = parseInt(m[2], 16) / 255, b = parseInt(m[3], 16) / 255;
   const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
-  const s = max === 0 ? 0 : d / max;
+  const sv = max === 0 ? 0 : d / max;
   let h = 0;
   if (d !== 0) {
     if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
@@ -61,7 +66,7 @@ function hexToHsb(hex) {
     else h = (r - g) / d + 4;
     h /= 6;
   }
-  return { hue: h * 360, saturation: s, brightness: max };
+  return { hue: h * 360, saturation: sv, brightness: max };
 }
 
 export default function SettingsPage() {
@@ -74,13 +79,12 @@ export default function SettingsPage() {
 
   // Form states
   const [globalEnable, setGlobalEnable] = useState(true);
-  const [ctaText, setCtaText] = useState("Virtual Try-On");
+  const [ctaText, setCtaText] = useState("Try On with Fitly");
   const [category, setCategory] = useState("auto");
-  const [aiEngine, setAiEngine] = useState("premium");
   const [primaryColor, setPrimaryColor] = useState({ hue: 240, saturation: 0.67, brightness: 0.95 });
   const [overageEnabled, setOverageEnabled] = useState(true);
+  const [geminiPrompt, setGeminiPrompt] = useState(DEFAULT_GEMINI_PROMPT);
 
-  // Tracking baseline for dirty/clean state
   const savedRef = useRef(null);
   const hexColor = useMemo(() => hsbToHex(primaryColor), [primaryColor]);
 
@@ -91,22 +95,15 @@ export default function SettingsPage() {
       globalEnable !== s.globalEnable ||
       ctaText !== s.ctaText ||
       category !== s.category ||
-      aiEngine !== s.aiEngine ||
       overageEnabled !== s.overageEnabled ||
-      hexColor !== hsbToHex(s.primaryColor)
+      hexColor !== hsbToHex(s.primaryColor) ||
+      geminiPrompt !== s.geminiPrompt
     );
-  }, [globalEnable, ctaText, category, aiEngine, overageEnabled, primaryColor, hexColor]);
+  }, [globalEnable, ctaText, category, overageEnabled, primaryColor, hexColor, geminiPrompt]);
 
-  // Handle native SaveBar visibility purely via DOM for reliability with <ui-save-bar>
   useEffect(() => {
     const saveBarNode = document.getElementById("app-bridge-save-bar");
-    if (saveBarNode) {
-      if (isDirty) {
-        saveBarNode.show();
-      } else {
-        saveBarNode.hide();
-      }
-    }
+    if (saveBarNode) { isDirty ? saveBarNode.show() : saveBarNode.hide(); }
   }, [isDirty]);
 
   const loadSettings = useCallback(async () => {
@@ -116,23 +113,25 @@ export default function SettingsPage() {
       const data = await api.get("/api/shop/settings");
       const s = data.settings;
 
-      const cfg = typeof s.widget_config === "string" ? JSON.parse(s.widget_config || "{}") : (s.widget_config ?? {});
+      const cfg = typeof s.widget_config === "string"
+        ? JSON.parse(s.widget_config || "{}")
+        : (s.widget_config ?? s.widget ?? {});
 
       const formState = {
         globalEnable: cfg.global_enable ?? true,
-        ctaText: cfg.cta_text ?? "Virtual Try-On",
+        ctaText: cfg.cta_text ?? "Try On with Fitly",
         category: cfg.default_category ?? "auto",
-        aiEngine: s.ai_engine || "premium",
         overageEnabled: s.quota?.overage_enabled ?? true,
         primaryColor: hexToHsb(cfg.primary_color || "#6366f1"),
+        geminiPrompt: cfg.gemini_prompt ?? s.gemini_prompt ?? DEFAULT_GEMINI_PROMPT,
       };
 
       setGlobalEnable(formState.globalEnable);
       setCtaText(formState.ctaText);
       setCategory(formState.category);
-      setAiEngine(formState.aiEngine);
       setOverageEnabled(formState.overageEnabled);
       setPrimaryColor(formState.primaryColor);
+      setGeminiPrompt(formState.geminiPrompt);
       savedRef.current = formState;
     } catch (e) {
       setError(e.message);
@@ -149,30 +148,27 @@ export default function SettingsPage() {
       setError(null);
       await api.put("/api/shop/settings", {
         overage_enabled: overageEnabled,
-        ai_engine: aiEngine,
+        gemini_prompt: geminiPrompt,
         widget_config: {
           global_enable: globalEnable,
           cta_text: ctaText,
           default_category: category,
           primary_color: hexColor,
+          gemini_prompt: geminiPrompt,
         },
       });
-      // Accept changes as new baseline
-      savedRef.current = { globalEnable, ctaText, category, aiEngine, overageEnabled, primaryColor };
-      // Force an update
+      savedRef.current = { globalEnable, ctaText, category, overageEnabled, primaryColor, geminiPrompt };
       setCtaText((v) => v);
-      shopify.toast.show("Configuration applied successfully");
-
+      shopify.toast.show("Settings saved successfully");
       const saveBarNode = document.getElementById("app-bridge-save-bar");
       if (saveBarNode) saveBarNode.hide();
-
     } catch (e) {
       setError(e.message);
-      shopify.toast.show("Could not save settings: " + e.message, { isError: true });
+      shopify.toast.show("Could not save: " + e.message, { isError: true });
     } finally {
       setSaving(false);
     }
-  }, [api, shopify, globalEnable, ctaText, category, aiEngine, overageEnabled, primaryColor, hexColor]);
+  }, [api, shopify, globalEnable, ctaText, category, overageEnabled, primaryColor, hexColor, geminiPrompt]);
 
   const handleDiscard = useCallback(() => {
     if (!savedRef.current) return;
@@ -180,10 +176,9 @@ export default function SettingsPage() {
     setGlobalEnable(s.globalEnable);
     setCtaText(s.ctaText);
     setCategory(s.category);
-    setAiEngine(s.aiEngine);
     setOverageEnabled(s.overageEnabled);
     setPrimaryColor(s.primaryColor);
-    
+    setGeminiPrompt(s.geminiPrompt ?? DEFAULT_GEMINI_PROMPT);
     const saveBarNode = document.getElementById("app-bridge-save-bar");
     if (saveBarNode) saveBarNode.hide();
   }, []);
@@ -192,25 +187,24 @@ export default function SettingsPage() {
     <Page>
       <TitleBar title="Settings" />
 
-      {/* --- Native UI Component provided by Shopify App Bridge V4 --- */}
       <ui-save-bar id="app-bridge-save-bar">
         <button variant="primary" onClick={handleSave} disabled={saving}></button>
         <button onClick={handleDiscard} disabled={saving}></button>
       </ui-save-bar>
 
       <BlockStack gap="500">
-        
+
         {error && (
           <Banner tone="critical" title="Save Error" onDismiss={() => setError(null)}>
             <p>{error}</p>
           </Banner>
         )}
 
-        {/* ────────── SECTION 1: GLOBAL VISIBILITY ────────── */}
+        {/* ── SECTION 1: GLOBAL VISIBILITY ── */}
         <Layout>
           <Layout.AnnotatedSection
             title="Widget Visibility"
-            description="Control whether the Virtual Try-On widget appears on your storefront. Ensure the App Block is enabled in your Theme Editor."
+            description="Control whether the Fitly Try-On button appears on your storefront. Enable the App Embed in your Theme Editor."
           >
             <Card roundedAbove="sm">
               {loading ? (
@@ -218,15 +212,15 @@ export default function SettingsPage() {
               ) : (
                 <BlockStack gap="400">
                   <Checkbox
-                    label="Enable Virtual Try-On globally"
-                    helpText="Shows the Try-On button on every product page automatically."
+                    label="Enable Fitly Try-On globally"
+                    helpText="Shows the Try-On button on every product page. You can also control per-product visibility from the Products page."
                     checked={globalEnable}
                     onChange={setGlobalEnable}
                   />
                   {!globalEnable && (
                     <Box paddingBlockStart="200">
                       <Banner tone="info" title="Widget is inactive">
-                        The Try-On button will be hidden from all your products.
+                        The Try-On button is hidden from all products.
                       </Banner>
                     </Box>
                   )}
@@ -238,30 +232,54 @@ export default function SettingsPage() {
 
         <Divider />
 
-        {/* ────────── SECTION 2: AI PROVIDER SETUP ────────── */}
+        {/* ── SECTION 2: GEMINI AI CONFIGURATION ── */}
         <Layout>
           <Layout.AnnotatedSection
-            title="Processing Platform"
-            description="Select the engine that powers the Try-On feature. Premium runs quickly (~15s) with high consistency. Community operates on a shared free queue and may take minutes."
+            title="Gemini AI Configuration"
+            description="Fitly uses Google Gemini to generate photorealistic try-on results (~20s). Customize the generation prompt to match your brand style."
           >
             <Card roundedAbove="sm">
               {loading ? (
                 <BlockStack gap="200">
                   <SkeletonDisplayText size="small" />
-                  <SkeletonBodyText lines={2} />
+                  <SkeletonBodyText lines={4} />
                 </BlockStack>
               ) : (
-                <BlockStack gap="500">
-                  <Select
-                    label="Active AI Engine"
-                    options={AI_ENGINE_OPTIONS}
-                    value={aiEngine}
-                    onChange={setAiEngine}
-                  />
+                <BlockStack gap="400">
+                  <Box background="bg-surface-secondary" padding="300" borderRadius="200" borderColor="border" borderWidth="025">
+                    <InlineStack gap="200" blockAlign="center">
+                      <div style={{
+                        width: 10, height: 10, borderRadius: "50%",
+                        background: "linear-gradient(135deg, #4285F4, #34A853, #FBBC05, #EA4335)"
+                      }} />
+                      <Text variant="bodySm" tone="subdued">Powered by Google Gemini — engine is fixed to ensure consistent quality</Text>
+                    </InlineStack>
+                  </Box>
+
+                  <Box background="bg-surface-secondary" padding="400" borderRadius="200" borderColor="border" borderWidth="025">
+                    <BlockStack gap="300">
+                      <InlineStack align="space-between" blockAlign="center">
+                        <Text variant="bodyMd" fontWeight="medium">Generation Prompt</Text>
+                        <Button size="slim" variant="plain" onClick={() => setGeminiPrompt(DEFAULT_GEMINI_PROMPT)}>
+                          Reset to default
+                        </Button>
+                      </InlineStack>
+                      <TextField
+                        label=""
+                        labelHidden
+                        value={geminiPrompt}
+                        onChange={setGeminiPrompt}
+                        multiline={6}
+                        autoComplete="off"
+                        helpText="Both the customer photo and the product image are sent automatically — this prompt instructs how Gemini should compose the result."
+                      />
+                    </BlockStack>
+                  </Box>
+
                   <Divider />
                   <Checkbox
                     label="Allow over-quota usage billing"
-                    helpText="Generations beyond your monthly limit are billed automatically at your plan's standard overage rate to prevent feature interruption."
+                    helpText="Generations beyond your plan's monthly limit are billed at your plan's overage rate to prevent service interruption."
                     checked={overageEnabled}
                     onChange={setOverageEnabled}
                   />
@@ -273,20 +291,19 @@ export default function SettingsPage() {
 
         <Divider />
 
-        {/* ────────── SECTION 3: STOREFRONT DESIGNER ────────── */}
+        {/* ── SECTION 3: STOREFRONT DESIGNER ── */}
         <Layout>
           <Layout.AnnotatedSection
             title="Storefront Designer"
-            description="Adapt the try-on button to blend perfectly with your existing Shopify theme."
+            description="Customize the Try-On button to match your Shopify theme."
           >
             <Card roundedAbove="sm">
               {loading ? (
                 <BlockStack gap="200"><SkeletonBodyText lines={6} /></BlockStack>
               ) : (
                 <BlockStack gap="500">
-                  
                   <TextField
-                    label="Call to action text"
+                    label="Button label"
                     value={ctaText}
                     onChange={setCtaText}
                     maxLength={32}
@@ -298,63 +315,45 @@ export default function SettingsPage() {
                     options={CATEGORY_OPTIONS}
                     value={category}
                     onChange={setCategory}
-                    helpText="Used if the app cannot automatically detect the correct garment type from the product's Shopify tags."
+                    helpText="Used if Gemini cannot auto-detect the garment type from product tags."
                   />
 
-                  {/* Modern Split Preview layout using Flex InlineGrid */}
                   <BlockStack gap="300">
-                    <Text variant="bodyMd" as="label" fontWeight="medium">Brand Hex Color</Text>
-                    
+                    <Text variant="bodyMd" as="label" fontWeight="medium">Brand Color</Text>
                     <InlineGrid columns={{ xs: 1, md: 2 }} gap="400" alignItems="start">
-                      
-                      {/* Left side: Actual color picker control */}
                       <Box background="bg-surface-secondary" padding="400" borderRadius="200" borderColor="border" borderWidth="025">
-                         <BlockStack gap="400" align="center">
-                            <ColorPicker onChange={setPrimaryColor} color={primaryColor} />
-                            
-                            <InlineStack gap="300" blockAlign="center" wrap={false}>
-                              <div style={{ width: 24, height: 24, backgroundColor: hexColor, borderRadius: 4, border: "1px solid #C9CCCF" }} />
-                              <Text variant="bodyMd"><code>{hexColor}</code></Text>
-                            </InlineStack>
-                         </BlockStack>
+                        <BlockStack gap="400" align="center">
+                          <ColorPicker onChange={setPrimaryColor} color={primaryColor} />
+                          <InlineStack gap="300" blockAlign="center" wrap={false}>
+                            <div style={{ width: 24, height: 24, backgroundColor: hexColor, borderRadius: 4, border: "1px solid #C9CCCF" }} />
+                            <Text variant="bodyMd"><code>{hexColor}</code></Text>
+                          </InlineStack>
+                        </BlockStack>
                       </Box>
-                      
-                      {/* Right side: Storefront Preview Mockup */}
+
                       <Box padding="400" borderRadius="200" background="bg-surface" shadow="100" borderColor="border" borderWidth="025">
                         <BlockStack gap="400" align="center">
                           <Text variant="bodySm" tone="subdued">Storefront Preview</Text>
-                          
-                          {/* Fake product card skeleton */}
                           <div style={{ width: "100%", maxWidth: "280px", margin: "0 auto" }}>
                             <BlockStack gap="300">
                               <Box background="bg-surface-secondary" padding="600" borderRadius="100" />
                               <SkeletonBodyText lines={2} />
-                              
-                              {/* The live button */}
                               <button
                                 style={{
-                                  width: "100%",
-                                  padding: "12px 16px",
-                                  borderRadius: "4px",
-                                  backgroundColor: hexColor,
-                                  color: "#ffffff",
-                                  border: "none",
-                                  fontSize: "14px",
-                                  fontWeight: "500",
-                                  letterSpacing: "0.5px",
-                                  fontFamily: "inherit",
-                                  boxShadow: "0 1px 3px rgba(0,0,0,0.12)",
-                                  cursor: "not-allowed"
+                                  width: "100%", padding: "12px 16px", borderRadius: "4px",
+                                  backgroundColor: hexColor, color: "#ffffff", border: "none",
+                                  fontSize: "14px", fontWeight: "500", letterSpacing: "0.5px",
+                                  fontFamily: "inherit", boxShadow: "0 1px 3px rgba(0,0,0,0.12)",
+                                  cursor: "not-allowed",
                                 }}
                                 disabled
                               >
-                                {ctaText || "Virtual Try-On"}
+                                {ctaText || "Try On with Fitly"}
                               </button>
                             </BlockStack>
                           </div>
                         </BlockStack>
                       </Box>
-
                     </InlineGrid>
                   </BlockStack>
                 </BlockStack>
@@ -363,7 +362,6 @@ export default function SettingsPage() {
           </Layout.AnnotatedSection>
         </Layout>
 
-        {/* Bottom spacer */}
         <Box paddingBlockEnd="1600" />
       </BlockStack>
     </Page>

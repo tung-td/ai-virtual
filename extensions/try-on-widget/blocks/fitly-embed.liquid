@@ -1,0 +1,71 @@
+{% comment %}
+  fitly-embed.liquid — Fitly App Embed block.
+  Injected globally via "App Embeds" in the Shopify Theme Editor.
+  No manual block placement needed — the JS finds and injects itself.
+  Cache bust: 2026-03-18 v1
+{% endcomment %}
+
+{% liquid
+  assign fitly_enabled = block.settings.enabled
+  assign app_url = block.settings.app_url
+  assign cta_text = block.settings.cta_text | default: "Try On with Fitly"
+  assign primary_color = block.settings.primary_color | default: "#6366f1"
+%}
+
+{% if fitly_enabled %}
+  {{ 'try-on-widget.css' | asset_url | stylesheet_tag }}
+
+  <script>
+    // ─── Fitly App Embed Configuration ────────────────────────────────────
+    // INJECTION_SELECTOR: CSS selector for where to inject the Try-On button.
+    // Change this to target your theme's Add-to-Cart form if needed.
+    // Examples:
+    //   "form[action='/cart/add']"       — most themes
+    //   "#product_form_{{ product.id }}" — Debut / older themes
+    //   ".product-form"                  — Dawn-based themes
+    var FitlyConfig = {
+      INJECTION_SELECTOR: "form[action*='/cart/add']",
+      PRODUCT_ID: {{ product.id | default: "null" }},
+      APP_URL: {{ app_url | json }},
+      SHOP_DOMAIN: {{ shop.permanent_domain | json }},
+      CTA_TEXT: {{ cta_text | json }},
+      PRIMARY_COLOR: {{ primary_color | json }},
+      GARMENT_URL: {% if product.featured_image %}{{ product.featured_image | image_url: width: 1024 | json }}{% else %}null{% endif %},
+    };
+  </script>
+
+  <script src="{{ 'try-on-widget.js' | asset_url }}" defer></script>
+{% endif %}
+
+{% schema %}
+{
+  "name": "Fitly Try-On",
+  "target": "body",
+  "settings": [
+    {
+      "type": "checkbox",
+      "id": "enabled",
+      "label": "Enable Fitly Try-On",
+      "default": true
+    },
+    {
+      "type": "text",
+      "id": "app_url",
+      "label": "App URL",
+      "info": "Your Fitly app tunnel URL (ngrok / Shopify tunnel). Set this in Settings."
+    },
+    {
+      "type": "text",
+      "id": "cta_text",
+      "label": "Button label",
+      "default": "Try On with Fitly"
+    },
+    {
+      "type": "text",
+      "id": "primary_color",
+      "label": "Primary color (hex)",
+      "default": "#6366f1"
+    }
+  ]
+}
+{% endschema %}

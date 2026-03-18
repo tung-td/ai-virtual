@@ -1,10 +1,15 @@
+import * as dotenv from "dotenv";
 import { join } from "path";
 import { readFileSync } from "fs";
 import express from "express";
 import serveStatic from "serve-static";
 
-// ── MVC imports ───────────────────────────────────────────────────────────────
+// ── Load .env FIRST ───────────────────────────────────────────────────────────
+dotenv.config({ path: join(process.cwd(), "..", ".env") });
+
+// ── MVC imports (after dotenv so env vars are available) ─────────────────────
 import shopify from "./backend/config/shopify.js";
+import { initDatabase } from "./backend/config/database.js";
 import apiRoutes from "./backend/routes/index.js";
 import {
   begin,
@@ -14,8 +19,8 @@ import {
 import { requireInstalled } from "./backend/middlewares/auth.js";
 import { errorHandler } from "./backend/middlewares/errorHandler.js";
 
-// ── Bootstrap DB (runs migrations on startup) ─────────────────────────────────
-import "./backend/config/database.js";
+// ── Bootstrap DB (AFTER dotenv so DATABASE_URL is readable) ───────────────────
+initDatabase().catch((err) => console.error("[index.js] DB init error:", err));
 
 const PORT = parseInt(
   process.env.BACKEND_PORT || process.env.PORT || "3000",

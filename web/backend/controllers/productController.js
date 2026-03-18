@@ -1,111 +1,143 @@
-
 import { asyncHandler, AppError } from "../middlewares/errorHandler.js";
-import { getSessionShop, getSession } from "../middlewares/auth.js";
+import { getSession } from "../middlewares/auth.js";
 import { getGraphqlClient } from "../services/shopifyClient.js";
 
 /**
  * GET /api/products
- * List all products with their try-on enabled status (via metafield).
+ * Fetches products from Shopify GraphQL with optional filters.
+ * Query params:
+ *   - search   {string}  — title search
+ *   - tag      {string}  — filter by tag
+ *   - type     {string}  — filter by product type
+ *   - cursor   {string}  — pagination cursor (after)
  */
-export const listProducts = asyncHandler(async (_req, res) => {
+export const listProducts = asyncHandler(async (req, res) => {
   const session = getSession(res);
   const client = getGraphqlClient(session);
 
-  const response = await client.request(
-    `
-    query getProducts($first: Int!) {
-      products(first: $first) {
+  const { search, tag, type, cursor } = req.query;
+
+  // Build Shopify query string
+  const parts = [];
+  if (search) parts.push(`title:*${search}*`);
+  if (tag) parts.push(`tag:${tag}`);
+  if (type) parts.push(`product_type:${type}`);
+  const queryStr = parts.length ? parts.join(" AND ") : null;
+
+  const gql = `
+    query listProducts($query: String, $after: String) {
+      products(first: 20, query: $query, after: $after) {
+        pageInfo { hasNextPage endCursor }
         edges {
           node {
             id
             title
             handle
             status
-            featuredImage {
-              url
-              altText
-            }
-            metafield(namespace: "ai_tryon", key: "enabled") {
+            productType
+            tags
+            featuredImage { url altText }
+            metafield(namespace: "fitly", key: "enabled") {
+              id
               value
             }
           }
         }
       }
     }
-  `,
-    { variables: { first: 50 } },
-  );
+  `;
 
-  const products = response.data.products.edges.map(({ node }) => ({
+  const result = await client.request(gql, {
+    variables: { query: queryStr, after: cursor || null },
+  });
+
+  const { edges, pageInfo } = result.data?.products ?? { edges: [], pageInfo: {} };
+
+  const products = edges.map(({ node }) => ({
     id: node.id,
     title: node.title,
     handle: node.handle,
     status: node.status,
+    productType: node.productType,
+    tags: node.tags,
     image: node.featuredImage?.url ?? null,
-    tryon_enabled: node.metafield?.value === "true",
+    // null metafield = never explicitly disabled → treat as enabled
+    fitlyEnabled: node.metafield ? node.metafield.value === "true" : true,
+    metafieldId: node.metafield?.id ?? null,
   }));
 
-  res.json({ success: true, products });
+  res.json({ success: true, products, pageInfo });
 });
 
 /**
- * POST /api/products/:id/tryon
- * Enable or disable try-on for a product via Shopify metafield.
- *
- * Body: { enabled: boolean }
+ * PUT /api/products/fitly-enabled
+ * Writes (or removes) the fitly.enabled metafield on a product.
+ * Body: { productId: string, enabled: boolean, metafieldId?: string }
  */
-export const setTryOnEnabled = asyncHandler(async (req, res) => {
+export const setProductEnabled = asyncHandler(async (req, res) => {
   const session = getSession(res);
   const client = getGraphqlClient(session);
-  const { id } = req.params; // GID like "gid://shopify/Product/12345"
-  const { enabled } = req.body;
 
-  if (typeof enabled !== "boolean") {
-    throw new AppError("enabled must be a boolean", 400, "VALIDATION_ERROR");
+  const { productId, enabled, metafieldId } = req.body;
+
+  if (!productId) throw new AppError("productId is required", 400);
+  if (enabled === undefined) throw new AppError("enabled (boolean) is required", 400);
+
+  let gid = productId;
+  if (!gid.startsWith("gid://")) {
+    gid = `gid://shopify/Product/${productId}`;
   }
 
-  // Decode if the id is URL-encoded
-  const productId = decodeURIComponent(id);
-
-  const response = await client.request(
-    `
-    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
-      metafieldsSet(metafields: $metafields) {
-        metafields {
-          key
-          value
+  if (enabled === true && metafieldId) {
+    // Delete metafield: absence = "enabled" (default), saves storage
+    await client.request(
+      `mutation deleteMetafield($input: MetafieldDeleteInput!) {
+        metafieldDelete(input: $input) { deletedId userErrors { field message } }
+      }`,
+      { variables: { input: { id: metafieldId } } },
+    );
+  } else {
+    const result = await client.request(
+      `mutation setMetafield($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields { id namespace key value }
+          userErrors { field message }
         }
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `,
-    {
-      variables: {
-        metafields: [
-          {
-            ownerId: productId,
-            namespace: "ai_tryon",
+      }`,
+      {
+        variables: {
+          metafields: [{
+            ownerId: gid,
+            namespace: "fitly",
             key: "enabled",
             type: "boolean",
-            value: String(enabled),
-          },
-        ],
+            value: enabled ? "true" : "false",
+          }],
+        },
       },
-    },
-  );
-
-  const { userErrors } = response.data.metafieldsSet;
-  if (userErrors?.length > 0) {
-    throw new AppError(userErrors[0].message, 400, "SHOPIFY_MUTATION_ERROR");
+    );
+    const errors = result.data?.metafieldsSet?.userErrors;
+    if (errors?.length) throw new AppError(errors[0].message, 400, "SHOPIFY_MUTATION_ERROR");
   }
 
-  res.json({
-    success: true,
-    message: `Try-on ${
-      enabled ? "enabled" : "disabled"
-    } for product ${productId}`,
-  });
+  res.json({ success: true, productId: gid, enabled });
+});
+
+/**
+ * GET /api/products/meta
+ * Returns product types and top tags for filter dropdowns.
+ */
+export const getProductMeta = asyncHandler(async (req, res) => {
+  const session = getSession(res);
+  const client = getGraphqlClient(session);
+
+  const [typesResult, tagsResult] = await Promise.all([
+    client.request(`{ productTypes(first: 50) { edges { node } } }`),
+    client.request(`{ shop { productTags(first: 50) { edges { node } } } }`),
+  ]);
+
+  const productTypes = typesResult.data?.productTypes?.edges?.map(e => e.node).filter(Boolean) ?? [];
+  const productTags = tagsResult.data?.shop?.productTags?.edges?.map(e => e.node).filter(Boolean) ?? [];
+
+  res.json({ success: true, productTypes, productTags });
 });

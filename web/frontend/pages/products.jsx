@@ -1,273 +1,281 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Page,
+  Layout,
   Card,
   Text,
+  TextField,
+  Select,
   Badge,
-  Thumbnail,
   Button,
   Banner,
   SkeletonBodyText,
-  SkeletonThumbnail,
   Box,
-  IndexTable,
-  useIndexResourceState,
   BlockStack,
   InlineStack,
-  EmptyState,
-  ChoiceList,
-  Filters,
-  InlineGrid,
+  Thumbnail,
+  Divider,
+  Spinner,
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { useApi } from "../utils/api";
 
-// Fixed-height skeleton row to prevent CLS
-function ProductRowSkeleton() {
+/** Toggle switch — simple native component */
+function Toggle({ checked, onChange, disabled }) {
   return (
-    <Box padding="300">
-      <InlineStack gap="300" blockAlign="center">
-        <SkeletonThumbnail size="small" />
-        <Box minWidth="200px">
-          <SkeletonBodyText lines={1} />
-        </Box>
-      </InlineStack>
-    </Box>
+    <button
+      role="switch"
+      aria-checked={checked}
+      onClick={() => !disabled && onChange(!checked)}
+      style={{
+        position: "relative",
+        width: 44,
+        height: 24,
+        borderRadius: 12,
+        border: "none",
+        background: checked ? "#6366f1" : "#d2d2d2",
+        cursor: disabled ? "not-allowed" : "pointer",
+        transition: "background 0.2s",
+        flexShrink: 0,
+        padding: 0,
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: 3,
+          left: checked ? 23 : 3,
+          width: 18,
+          height: 18,
+          borderRadius: "50%",
+          background: "#fff",
+          boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+          transition: "left 0.2s",
+        }}
+      />
+    </button>
   );
 }
 
 export default function ProductsPage() {
   const api = useApi();
   const shopify = useAppBridge();
+
   const [products, setProducts] = useState([]);
+  const [pageInfo, setPageInfo] = useState({ hasNextPage: false, endCursor: null });
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(null);
-  const [toggling, setToggling] = useState(new Set());
+  const [toggling, setToggling] = useState({});
 
-  // Search & filter state
-  const [searchValue, setSearchValue] = useState("");
-  const [statusFilter, setStatusFilter] = useState([]); // ["enabled"] | ["disabled"] | []
+  // Filters
+  const [search, setSearch] = useState("");
+  const [filterTag, setFilterTag] = useState("");
+  const [filterType, setFilterType] = useState("");
+  const [tagOptions, setTagOptions] = useState([{ label: "All Tags", value: "" }]);
+  const [typeOptions, setTypeOptions] = useState([{ label: "All Types", value: "" }]);
 
-  const loadProducts = useCallback(async () => {
+  const searchTimer = useRef(null);
+
+  // Load filter options
+  useEffect(() => {
+    api.get("/api/products/meta")
+      .then(({ productTypes, productTags }) => {
+        setTypeOptions([
+          { label: "All Types", value: "" },
+          ...productTypes.map(t => ({ label: t, value: t })),
+        ]);
+        setTagOptions([
+          { label: "All Tags", value: "" },
+          ...productTags.map(t => ({ label: t, value: t })),
+        ]);
+      })
+      .catch(() => {});
+  }, [api]);
+
+  const fetchProducts = useCallback(async ({ cursor = null, append = false } = {}) => {
     try {
-      setLoading(true);
+      append ? setLoadingMore(true) : setLoading(true);
       setError(null);
-      const data = await api.get("/api/products");
-      setProducts(data.products ?? []);
+
+      const params = new URLSearchParams();
+      if (search) params.set("search", search);
+      if (filterTag) params.set("tag", filterTag);
+      if (filterType) params.set("type", filterType);
+      if (cursor) params.set("cursor", cursor);
+
+      const data = await api.get(`/api/products?${params.toString()}`);
+      setProducts(prev => append ? [...prev, ...data.products] : data.products);
+      setPageInfo(data.pageInfo ?? { hasNextPage: false, endCursor: null });
     } catch (e) {
       setError(e.message);
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  }, [api]);
+  }, [api, search, filterTag, filterType]);
 
-  useEffect(() => { loadProducts(); }, [loadProducts]);
+  // Debounced refetch when filters change
+  useEffect(() => {
+    clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => { fetchProducts(); }, 350);
+    return () => clearTimeout(searchTimer.current);
+  }, [search, filterTag, filterType, fetchProducts]);
 
-  const handleToggle = useCallback(async (productId, enabled) => {
-    setToggling((prev) => new Set([...prev, productId]));
+  const handleToggle = useCallback(async (product) => {
+    const { id, fitlyEnabled, metafieldId } = product;
+    setToggling(t => ({ ...t, [id]: true }));
+    // Optimistic update
+    setProducts(prev => prev.map(p => p.id === id ? { ...p, fitlyEnabled: !fitlyEnabled } : p));
     try {
-      const encodedId = encodeURIComponent(productId);
-      await api.post(`/api/products/${encodedId}/tryon`, { enabled });
-      setProducts((prev) =>
-        prev.map((p) => (p.id === productId ? { ...p, tryon_enabled: enabled } : p))
-      );
-      shopify.toast.show(`Try-On ${enabled ? "enabled" : "disabled"}`, { duration: 2500 });
-    } catch (e) {
-      shopify.toast.show("Update failed: " + e.message, { isError: true, duration: 4000 });
-    } finally {
-      setToggling((prev) => {
-        const next = new Set(prev);
-        next.delete(productId);
-        return next;
+      await api.put("/api/products/fitly-enabled", {
+        productId: id,
+        enabled: !fitlyEnabled,
+        metafieldId,
       });
+      shopify.toast.show(`Try-On ${!fitlyEnabled ? "enabled" : "disabled"} for "${product.title}"`);
+    } catch (e) {
+      // Revert
+      setProducts(prev => prev.map(p => p.id === id ? { ...p, fitlyEnabled } : p));
+      shopify.toast.show(`Error: ${e.message}`, { isError: true });
+    } finally {
+      setToggling(t => ({ ...t, [id]: false }));
     }
   }, [api, shopify]);
 
-  const { selectedResources, allResourcesSelected, handleSelectionChange } = useIndexResourceState(products);
-
-  const handleBulkEnable = useCallback(async () => {
-    const targets = products.filter((p) => selectedResources.includes(p.id) && !p.tryon_enabled);
-    await Promise.allSettled(targets.map((p) => handleToggle(p.id, true)));
-  }, [products, selectedResources, handleToggle]);
-
-  const handleBulkDisable = useCallback(async () => {
-    const targets = products.filter((p) => selectedResources.includes(p.id) && p.tryon_enabled);
-    await Promise.allSettled(targets.map((p) => handleToggle(p.id, false)));
-  }, [products, selectedResources, handleToggle]);
-
-  const filteredProducts = useMemo(() => {
-    let list = products;
-    if (searchValue.trim()) {
-      const q = searchValue.toLowerCase();
-      list = list.filter((p) => p.title?.toLowerCase().includes(q));
-    }
-    if (statusFilter.includes("enabled")) list = list.filter((p) => p.tryon_enabled);
-    else if (statusFilter.includes("disabled")) list = list.filter((p) => !p.tryon_enabled);
-    return list;
-  }, [products, searchValue, statusFilter]);
-
-  const activeFilters = useMemo(() => {
-    const f = [];
-    if (statusFilter.length > 0)
-      f.push({ key: "status", label: `Try-On: ${statusFilter[0]}`, onRemove: () => setStatusFilter([]) });
-    return f;
-  }, [statusFilter]);
-
-  const rowMarkup = filteredProducts.map(({ id, title, image, status, tryon_enabled }, index) => (
-    <IndexTable.Row id={id} key={id} selected={selectedResources.includes(id)} position={index}>
-      <IndexTable.Cell>
-        <InlineStack gap="300" blockAlign="center">
-          <Thumbnail source={image || "https://placehold.co/40x40/f1f1f1/999?text=?"} alt={title} size="small" />
-          <Text variant="bodyMd" fontWeight="semibold" as="span">{title}</Text>
-        </InlineStack>
-      </IndexTable.Cell>
-      <IndexTable.Cell>
-        <Badge tone={status === "ACTIVE" ? "success" : "attention"}>
-          {status === "ACTIVE" ? "Active" : status}
-        </Badge>
-      </IndexTable.Cell>
-      <IndexTable.Cell>
-        <InlineStack gap="200" blockAlign="center">
-          <Badge tone={tryon_enabled ? "success" : "subdued"} progress={tryon_enabled ? "complete" : "incomplete"}>
-            {tryon_enabled ? "Enabled" : "Disabled"}
-          </Badge>
-          <Button
-            size="slim"
-            variant={tryon_enabled ? "secondary" : "primary"}
-            onClick={() => handleToggle(id, !tryon_enabled)}
-            loading={toggling.has(id)}
-            disabled={toggling.has(id)}
-          >
-            {tryon_enabled ? "Disable" : "Enable"}
-          </Button>
-        </InlineStack>
-      </IndexTable.Cell>
-    </IndexTable.Row>
-  ));
-
-  const bulkActions = [
-    { content: "Enable Try-On", onAction: handleBulkEnable },
-    { content: "Disable Try-On", onAction: handleBulkDisable, destructive: true },
-  ];
-
-  const total = products.length;
-  const enabledCount = products.filter((p) => p.tryon_enabled).length;
-
   return (
-    <Page
-      title="Manage Products"
-      subtitle="Select products to enable or disable the Virtual Try-On widget"
-      primaryAction={{ content: "Refresh Data", onAction: loadProducts, loading }}
-      fullWidth
-    >
+    <Page fullWidth>
       <TitleBar title="Products" />
 
       <BlockStack gap="500">
         {error && (
-          <Banner tone="critical" title="Failed to load products" onDismiss={() => setError(null)}>
+          <Banner tone="critical" title="Error loading products" onDismiss={() => setError(null)}>
             <p>{error}</p>
           </Banner>
         )}
 
-        {/* Top Metric Cards for Products Page */}
-        {!loading && total > 0 && (
-          <InlineGrid columns={{ xs: 1, sm: 3 }} gap="400">
-             <Card background="bg-surface-secondary">
-               <BlockStack gap="100">
-                 <Text variant="heading2xl" as="p" fontWeight="bold">{total}</Text>
-                 <Text variant="bodyMd" tone="subdued">Total Synced Products</Text>
-               </BlockStack>
-             </Card>
-             <Card>
-               <BlockStack gap="100">
-                 <Text variant="heading2xl" as="p" fontWeight="bold" tone="success">{enabledCount}</Text>
-                 <Text variant="bodyMd" tone="subdued">Active Widgets</Text>
-               </BlockStack>
-             </Card>
-             <Card>
-               <BlockStack gap="100">
-                 <Text variant="heading2xl" as="p" fontWeight="bold">{total - enabledCount}</Text>
-                 <Text variant="bodyMd" tone="subdued">Disabled Products</Text>
-               </BlockStack>
-             </Card>
-          </InlineGrid>
-        )}
+        {/* Filter Bar */}
+        <Card roundedAbove="sm">
+          <BlockStack gap="400">
+            <InlineStack align="space-between" blockAlign="center" wrap={false}>
+              <Text variant="headingMd" as="h2">Product Visibility</Text>
+            </InlineStack>
+            <Text variant="bodySm" tone="subdued">
+              By default, Fitly Try-On is <b>enabled</b> for all products. Disable it for products that are not suitable for virtual try-on (e.g., accessories, home goods).
+            </Text>
+            <Divider />
+            <InlineStack gap="300" wrap={true} blockAlign="end">
+              <Box minWidth="220px">
+                <TextField
+                  label="Search products"
+                  value={search}
+                  onChange={setSearch}
+                  placeholder="Search by title…"
+                  autoComplete="off"
+                  clearButton
+                  onClearButtonClick={() => setSearch("")}
+                />
+              </Box>
+              <Box minWidth="160px">
+                <Select
+                  label="Product type"
+                  options={typeOptions}
+                  value={filterType}
+                  onChange={setFilterType}
+                />
+              </Box>
+              <Box minWidth="160px">
+                <Select
+                  label="Tag"
+                  options={tagOptions}
+                  value={filterTag}
+                  onChange={setFilterTag}
+                />
+              </Box>
+            </InlineStack>
+          </BlockStack>
+        </Card>
 
-        <Card padding="0">
+        {/* Product List */}
+        <Card roundedAbove="sm" padding="0">
           {loading ? (
-            <Box padding="400">
+            <Box padding="500">
               <BlockStack gap="300">
-                {[...Array(6)].map((_, i) => <ProductRowSkeleton key={i} />)}
+                {[1,2,3,4,5].map(i => <SkeletonBodyText key={i} lines={1} />)}
               </BlockStack>
             </Box>
-          ) : total === 0 ? (
-            <EmptyState
-              heading="No products found"
-              action={{ content: "Reload", onAction: loadProducts }}
-              image="https://cdn.shopify.com/s/files/1/0262/4071/2726/files/emptystate-files.png"
-            >
-              <p>Add products to your Shopify store and click refresh to start enabling Virtual Try-On.</p>
-            </EmptyState>
+          ) : products.length === 0 ? (
+            <Box padding="600">
+              <Text variant="bodyMd" tone="subdued" alignment="center">
+                No products found. Try adjusting your filters.
+              </Text>
+            </Box>
           ) : (
-            <div className="product-index-table">
-              <IndexTable
-                resourceName={{ singular: "product", plural: "products" }}
-                itemCount={filteredProducts.length}
-                selectedItemsCount={allResourcesSelected ? "All" : selectedResources.length}
-                onSelectionChange={handleSelectionChange}
-                bulkActions={bulkActions}
-                headings={[
-                  { title: "Product" },
-                  { title: "Store Status" },
-                  { title: "Try-On Widget" },
-                ]}
-                filterControl={
-                  <Filters
-                    queryValue={searchValue}
-                    queryPlaceholder="Search products by title..."
-                    onQueryChange={setSearchValue}
-                    onQueryClear={() => setSearchValue("")}
-                    filters={[
-                      {
-                        key: "status",
-                        label: "Widget Status",
-                        filter: (
-                          <ChoiceList
-                            title="Widget Status"
-                            titleHidden
-                            choices={[
-                              { label: "Enabled", value: "enabled" },
-                              { label: "Disabled", value: "disabled" },
-                            ]}
-                            selected={statusFilter}
-                            onChange={setStatusFilter}
-                          />
-                        ),
-                        shortcut: true,
-                      },
-                    ]}
-                    appliedFilters={activeFilters}
-                    onClearAll={() => { setSearchValue(""); setStatusFilter([]); }}
-                  />
-                }
-              >
-                {filteredProducts.length === 0 ? (
-                  <IndexTable.Row id="empty" position={0}>
-                    <IndexTable.Cell colSpan={3}>
-                      <Box padding="600">
-                        <Text alignment="center" tone="subdued">
-                          No products match your search/filter.
+            <BlockStack gap="0">
+              {/* Column header */}
+              <Box padding="300" background="bg-surface-secondary">
+                <InlineStack align="space-between" blockAlign="center">
+                  <Text variant="bodySm" fontWeight="semibold" tone="subdued">PRODUCT</Text>
+                  <Text variant="bodySm" fontWeight="semibold" tone="subdued">FITLY TRY-ON</Text>
+                </InlineStack>
+              </Box>
+
+              {products.map((product, idx) => (
+                <Box key={product.id}>
+                  {idx > 0 && <Divider />}
+                  <Box padding="400">
+                    <InlineStack align="space-between" blockAlign="center" wrap={false} gap="400">
+                      <InlineStack gap="300" blockAlign="center" wrap={false}>
+                        <Thumbnail
+                          source={product.image || ""}
+                          alt={product.title}
+                          size="small"
+                        />
+                        <BlockStack gap="100">
+                          <Text variant="bodyMd" fontWeight="semibold">{product.title}</Text>
+                          <InlineStack gap="200" wrap={true}>
+                            {product.status === "DRAFT" && <Badge tone="info">Draft</Badge>}
+                            {product.productType && <Badge>{product.productType}</Badge>}
+                            {product.tags?.slice(0, 3).map(tag => (
+                              <Badge key={tag} tone="subdued">{tag}</Badge>
+                            ))}
+                          </InlineStack>
+                        </BlockStack>
+                      </InlineStack>
+                      <InlineStack gap="200" blockAlign="center" wrap={false}>
+                        <Text variant="bodySm" tone={product.fitlyEnabled ? "success" : "subdued"}>
+                          {product.fitlyEnabled ? "On" : "Off"}
                         </Text>
-                      </Box>
-                    </IndexTable.Cell>
-                  </IndexTable.Row>
-                ) : (
-                  rowMarkup
-                )}
-              </IndexTable>
-            </div>
+                        <Toggle
+                          checked={product.fitlyEnabled}
+                          onChange={() => handleToggle(product)}
+                          disabled={!!toggling[product.id]}
+                        />
+                        {toggling[product.id] && <Spinner size="small" />}
+                      </InlineStack>
+                    </InlineStack>
+                  </Box>
+                </Box>
+              ))}
+
+              {pageInfo.hasNextPage && (
+                <Box padding="400" borderColor="border" borderBlockStartWidth="025">
+                  <InlineStack align="center">
+                    <Button
+                      loading={loadingMore}
+                      onClick={() => fetchProducts({ cursor: pageInfo.endCursor, append: true })}
+                    >
+                      Load more
+                    </Button>
+                  </InlineStack>
+                </Box>
+              )}
+            </BlockStack>
           )}
         </Card>
+
+        <Box paddingBlockEnd="1600" />
       </BlockStack>
     </Page>
   );

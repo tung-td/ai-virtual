@@ -29,8 +29,8 @@ export function getPublicPlans() {
  * @param {string} shopDomain
  * @returns {{ allowed: boolean, remaining: number, overageActive: boolean }}
  */
-export function checkQuota(shopDomain) {
-  const shop = Shop.findByDomain(shopDomain);
+export async function checkQuota(shopDomain) {
+  const shop = await Shop.findByDomain(shopDomain);
   if (!shop) throw new AppError("Shop not found", 404, "SHOP_NOT_FOUND");
 
   const remaining = shop.quota_limit - shop.quota_used;
@@ -41,7 +41,6 @@ export function checkQuota(shopDomain) {
   }
 
   if (overageActive) {
-    // Overage is on: allow the generation, charge will be tracked separately
     return { allowed: true, remaining: 0, overageActive: true };
   }
 

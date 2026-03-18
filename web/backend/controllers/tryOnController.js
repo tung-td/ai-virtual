@@ -2,11 +2,7 @@ import multer from "multer";
 import TryOnJob from "../models/TryOnJob.js";
 import Shop from "../models/Shop.js";
 import { checkQuota } from "../services/billingService.js";
-import { submitTryOn, pollTryOnResult } from "../services/tryOnService.js";
-import {
-  submitFreeTryOn,
-  runOOTDiffusion,
-} from "../services/ootDiffusionService.js";
+import { runGeminiTryOn } from "../services/geminiService.js";
 import { asyncHandler, AppError } from "../middlewares/errorHandler.js";
 import { getSessionShop, getSession } from "../middlewares/auth.js";
 import { getGraphqlClient } from "../services/shopifyClient.js";
@@ -41,8 +37,7 @@ export const upload = multer({
 });
 
 /**
- * Helper — fetch product data (image URL, title, tags) via Shopify GraphQL.
- * Returns { imageUrl, title, tags } — all fields may be null/empty on failure.
+ * Helper — fetch product data via Shopify GraphQL.
  */
 async function getProductData(session, productId) {
   try {
@@ -69,27 +64,18 @@ async function getProductData(session, productId) {
 }
 
 /**
- * POST /api/tryon/submit
- * Accepts multipart/form-data with:
- *   - person_photo  (File)
- *   - product_id    (string — Shopify GID)
- *   - category      (optional: "tops"|"bottoms"|"one-pieces"|"auto")
+ * POST /api/tryon/submit  (in-app / admin)
  */
 export const submit = asyncHandler(async (req, res) => {
   const shopDomain = getSessionShop(res);
   const session = getSession(res);
+  const { product_id } = req.body;
 
-  const { product_id, category = "auto" } = req.body;
+  if (!req.file) throw new AppError("person_photo is required.", 400, "MISSING_FILE");
+  if (!product_id) throw new AppError("product_id is required.", 400, "MISSING_PRODUCT_ID");
 
-  if (!req.file) {
-    throw new AppError("person_photo is required.", 400, "MISSING_FILE");
-  }
-  if (!product_id) {
-    throw new AppError("product_id is required.", 400, "MISSING_PRODUCT_ID");
-  }
-
-  // 1. Quota check
-  const quota = checkQuota(shopDomain);
+  // Quota check
+  const quota = await checkQuota(shopDomain);
   if (!quota.allowed) {
     throw new AppError(
       "Monthly generation quota exhausted. Upgrade your plan or enable overage.",
@@ -98,329 +84,137 @@ export const submit = asyncHandler(async (req, res) => {
     );
   }
 
-  // 2. Encode person photo to base64
   const personImageBase64 = req.file.buffer.toString("base64");
+  const { imageUrl: garmentImageUrl } = await getProductData(session, product_id);
 
-  // 3. Resolve product data (image URL + title + tags) from Shopify
-  const { imageUrl: garmentImageUrl, title: productTitle, tags: productTags } =
-    await getProductData(session, product_id);
+  // Get Gemini prompt from widget_config
+  const shopConfig = await Shop.findByDomain(shopDomain);
+  let geminiPrompt = null;
+  try {
+    const wc =
+      typeof shopConfig?.widget_config === "object"
+        ? shopConfig.widget_config
+        : JSON.parse(shopConfig?.widget_config || "{}");
+    geminiPrompt = wc.gemini_prompt || null;
+  } catch { /* ignore */ }
 
-  // 4. Fetch shop config (AI Engine)
-  const shopConfig = Shop.findByDomain(shopDomain);
-  const engine = shopConfig?.ai_engine || "premium";
+  const { id: jobId } = await TryOnJob.create({ shop: shopDomain, product_id });
 
-  // 5. Create job record
-  const { id: jobId } = TryOnJob.create({
-    shop: shopDomain,
-    product_id,
-    fashn_prediction_id: null,
-  });
-
-  // 6. Submit based on engine
+  // Run Gemini in background
   setImmediate(async () => {
     try {
-      TryOnJob.updateStatus(jobId, { status: "processing" });
-
-      if (engine === "community") {
-        // Option 1: Community (Free - Hugging Face IDM-VTON)
-        const { predictionId } = await submitFreeTryOn(
-          personImageBase64,
-          garmentImageUrl,
-          category,
-        );
-        TryOnJob.setPredictionId(jobId, predictionId);
-
-        // Run the blocking Gradio call in background
-        // Pass productTitle + productTags so IDM-VTON can build a rich prompt
-        const result = await runOOTDiffusion(
-          personImageBase64,
-          garmentImageUrl,
-          category,
-          productTitle,
-          productTags,
-        );
-        if (result.status === "completed") {
-          TryOnJob.updateStatus(jobId, {
-            status: "done",
-            result_url: result.output,
-            counted: true,
-          });
-          Shop.incrementQuota(shopDomain);
-        } else {
-          throw new Error(result.error || "IDM-VTON failed");
-        }
+      await TryOnJob.updateStatus(jobId, { status: "processing" });
+      const result = await runGeminiTryOn(personImageBase64, garmentImageUrl, geminiPrompt);
+      if (result.status === "completed") {
+        await TryOnJob.updateStatus(jobId, { status: "done", result_url: result.output, counted: true });
+        await Shop.incrementQuota(shopDomain);
       } else {
-        // Option 2: Premium (Paid - fashn.ai) or Mock
-        const { predictionId } = await submitTryOn(
-          personImageBase64,
-          garmentImageUrl,
-          category,
-        );
-        TryOnJob.setPredictionId(jobId, predictionId);
+        throw new Error(result.error || "Gemini generation failed");
       }
     } catch (err) {
       console.error("[tryOnController] submit error:", err);
-      TryOnJob.updateStatus(jobId, {
-        status: "failed",
-        error: err.message,
-        counted: false,
-      });
+      await TryOnJob.updateStatus(jobId, { status: "failed", error: err.message });
     }
   });
 
-  res
-    .status(202)
-    .json({
-      success: true,
-      jobId,
-      estimatedSeconds: engine === "community" ? 60 : 15,
-    });
+  res.status(202).json({ success: true, jobId, estimatedSeconds: 20 });
 });
 
 /**
- * GET /api/tryon/:jobId/status
- * Polls fashn.ai if job is still processing; updates DB when done.
+ * GET /api/tryon/:jobId/status  (in-app / admin)
  */
 export const getStatus = asyncHandler(async (req, res) => {
   const shopDomain = getSessionShop(res);
   const { jobId } = req.params;
 
-  const job = TryOnJob.findById(Number(jobId));
-  if (!job || job.shop !== shopDomain) {
-    throw new AppError("Job not found", 404, "JOB_NOT_FOUND");
-  }
+  const job = await TryOnJob.findById(Number(jobId));
+  if (!job || job.shop !== shopDomain) throw new AppError("Job not found", 404, "JOB_NOT_FOUND");
 
-  // If still processing and we have a prediction ID, poll fashn.ai
-  if (job.status === "processing" && job.fashn_prediction_id) {
-    try {
-      const result = await pollTryOnResult(job.fashn_prediction_id);
-
-      if (result.status === "completed") {
-        TryOnJob.updateStatus(job.id, {
-          status: "done",
-          result_url: result.output,
-          counted: true,
-        });
-        Shop.incrementQuota(shopDomain);
-
-        return res.json({
-          success: true,
-          job: {
-            id: job.id,
-            status: "done",
-            result_url: result.output,
-            error: null,
-            created_at: job.created_at,
-          },
-        });
-      }
-
-      if (result.status === "failed") {
-        TryOnJob.updateStatus(job.id, {
-          status: "failed",
-          error: result.error ?? "fashn.ai generation failed",
-          counted: false,
-        });
-        return res.json({
-          success: true,
-          job: {
-            id: job.id,
-            status: "failed",
-            result_url: null,
-            error: result.error,
-            created_at: job.created_at,
-          },
-        });
-      }
-
-      // still starting/in_queue/processing — return current DB state
-    } catch (err) {
-      console.error("[tryOnController] poll error:", err);
-    }
-  }
-
-  // Re-read fresh job state
-  const fresh = TryOnJob.findById(Number(jobId));
   res.json({
     success: true,
     job: {
-      id: fresh.id,
-      status: fresh.status,
-      result_url: fresh.result_url,
-      error: fresh.error,
-      created_at: fresh.created_at,
+      id: job.id,
+      status: job.status,
+      result_url: job.result_url,
+      error: job.error,
+      created_at: job.created_at,
     },
   });
 });
 
 /**
- * POST /api/storefront/tryon/submit
- * Public storefront endpoint (CORS enabled). Requires `shop` in body.
+ * POST /api/storefront/tryon/submit  (public storefront)
  */
 export const submitStorefront = asyncHandler(async (req, res) => {
   const shopDomain = req.body.shop;
   if (!shopDomain) throw new AppError("Missing shop domain", 400);
 
-  // Retrieve offline session for this shop
-  const sessions = await shopify.config.sessionStorage.findSessionsByShop(
-    shopDomain,
-  );
+  const sessions = await shopify.config.sessionStorage.findSessionsByShop(shopDomain);
   const session = sessions.find((s) => !s.isOnline) || sessions[0];
   if (!session) throw new AppError("Store not authenticated", 401);
 
-  const { product_id, category = "auto" } = req.body;
+  const { product_id } = req.body;
+  if (!req.file) throw new AppError("person_photo is required.", 400, "MISSING_FILE");
+  if (!product_id) throw new AppError("product_id is required.", 400, "MISSING_PRODUCT_ID");
 
-  if (!req.file)
-    throw new AppError("person_photo is required.", 400, "MISSING_FILE");
-  if (!product_id)
-    throw new AppError("product_id is required.", 400, "MISSING_PRODUCT_ID");
-
-  const quota = checkQuota(shopDomain);
-  if (!quota.allowed) {
-    throw new AppError(
-      "Monthly generation quota exhausted.",
-      402,
-      "QUOTA_EXCEEDED",
-    );
-  }
+  const quota = await checkQuota(shopDomain);
+  if (!quota.allowed) throw new AppError("Monthly generation quota exhausted.", 402, "QUOTA_EXCEEDED");
 
   const personImageBase64 = req.file.buffer.toString("base64");
-  const { imageUrl: garmentImageUrl, title: productTitle, tags: productTags } =
-    await getProductData(session, product_id);
+  const { imageUrl: garmentImageUrl } = await getProductData(session, product_id);
 
-  const shopConfig = Shop.findByDomain(shopDomain);
-  const engine = shopConfig?.ai_engine || "premium";
+  const shopConfig = await Shop.findByDomain(shopDomain);
+  let geminiPrompt = null;
+  try {
+    const wc =
+      typeof shopConfig?.widget_config === "object"
+        ? shopConfig.widget_config
+        : JSON.parse(shopConfig?.widget_config || "{}");
+    geminiPrompt = wc.gemini_prompt || null;
+  } catch { /* ignore */ }
 
-  const { id: jobId } = TryOnJob.create({
-    shop: shopDomain,
-    product_id,
-    fashn_prediction_id: null,
-  });
+  const { id: jobId } = await TryOnJob.create({ shop: shopDomain, product_id });
 
   setImmediate(async () => {
     try {
-      TryOnJob.updateStatus(jobId, { status: "processing" });
-
-      if (engine === "community") {
-        const { predictionId } = await submitFreeTryOn(
-          personImageBase64,
-          garmentImageUrl,
-          category,
-        );
-        TryOnJob.setPredictionId(jobId, predictionId);
-
-        const result = await runOOTDiffusion(
-          personImageBase64,
-          garmentImageUrl,
-          category,
-          productTitle,
-          productTags,
-        );
-        if (result.status === "completed") {
-          TryOnJob.updateStatus(jobId, {
-            status: "done",
-            result_url: result.output,
-            counted: true,
-          });
-          Shop.incrementQuota(shopDomain);
-        } else {
-          throw new Error(result.error || "IDM-VTON failed");
-        }
+      await TryOnJob.updateStatus(jobId, { status: "processing" });
+      const result = await runGeminiTryOn(personImageBase64, garmentImageUrl, geminiPrompt);
+      if (result.status === "completed") {
+        await TryOnJob.updateStatus(jobId, { status: "done", result_url: result.output, counted: true });
+        await Shop.incrementQuota(shopDomain);
       } else {
-        const { predictionId } = await submitTryOn(
-          personImageBase64,
-          garmentImageUrl,
-          category,
-        );
-        TryOnJob.setPredictionId(jobId, predictionId);
+        throw new Error(result.error || "Gemini generation failed");
       }
     } catch (err) {
       console.error("[storefront] submit error:", err);
-      TryOnJob.updateStatus(jobId, {
-        status: "failed",
-        error: err.message,
-      });
+      await TryOnJob.updateStatus(jobId, { status: "failed", error: err.message });
     }
   });
 
-  res
-    .status(202)
-    .json({
-      success: true,
-      jobId,
-      estimatedSeconds: engine === "community" ? 60 : 15,
-    });
+  res.status(202).json({ success: true, jobId, estimatedSeconds: 20 });
 });
 
 /**
- * GET /api/storefront/tryon/:jobId/status
- * Public storefront polling endpoint. Requires `shop` in query.
+ * GET /api/storefront/tryon/:jobId/status  (public storefront polling)
  */
 export const getStatusStorefront = asyncHandler(async (req, res) => {
   const shopDomain = req.query.shop;
   if (!shopDomain) throw new AppError("Missing shop domain", 400);
 
   const { jobId } = req.params;
-  const job = TryOnJob.findById(Number(jobId));
+  const job = await TryOnJob.findById(Number(jobId));
 
   if (!job) throw new AppError("Job not found", 404);
   if (job.shop !== shopDomain) throw new AppError("Forbidden", 403);
 
-  if (["starting", "in_queue", "processing"].includes(job.status)) {
-    try {
-      if (job.fashn_prediction_id) {
-        const result = await pollTryOnResult(job.fashn_prediction_id);
-        if (result.status === "completed" && result.output) {
-          TryOnJob.updateStatus(job.id, {
-            status: "done",
-            result_url: result.output,
-            counted: true,
-          });
-          Shop.incrementQuota(shopDomain);
-
-          return res.json({
-            success: true,
-            job: {
-              id: job.id,
-              status: "done",
-              result_url: result.output,
-              error: null,
-              created_at: job.created_at,
-            },
-          });
-        }
-        if (result.status === "failed") {
-          TryOnJob.updateStatus(job.id, {
-            status: "failed",
-            error: result.error ?? "Generation failed",
-            counted: false,
-          });
-          return res.json({
-            success: true,
-            job: {
-              id: job.id,
-              status: "failed",
-              result_url: null,
-              error: result.error,
-              created_at: job.created_at,
-            },
-          });
-        }
-      }
-    } catch (err) {
-      console.error("[storefront] poll error:", err);
-    }
-  }
-
-  const fresh = TryOnJob.findById(Number(jobId));
   res.json({
     success: true,
     job: {
-      id: fresh.id,
-      status: fresh.status,
-      result_url: fresh.result_url,
-      error: fresh.error,
-      created_at: fresh.created_at,
+      id: job.id,
+      status: job.status,
+      result_url: job.result_url,
+      error: job.error,
+      created_at: job.created_at,
     },
   });
 });

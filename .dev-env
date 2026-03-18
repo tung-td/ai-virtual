@@ -1,0 +1,6 @@
+# MySQL connection — replace with your DB credentials
+DATABASE_URL=required
+
+# Google Gemini API
+GEMINI_API_KEY=required
+GEMINI_MODEL=required

@@ -1,38 +1,74 @@
 /**
- * try-on-widget.js — AI Virtual Try-On storefront widget.
- * Vanilla JS, Shadow DOM, < 30 KB.
- * Lazy-loaded from try-on-button.liquid.
+ * try-on-widget.js — Fitly Virtual Try-On storefront widget.
+ * Vanilla JS, Standard DOM (no Shadow DOM for max compatibility).
+ *
+ * Initialization modes:
+ *   1. App Embed (recommended) — FitlyConfig global injected by fitly-embed.liquid.
+ *      The script auto-finds the Add-to-Cart form via INJECTION_SELECTOR and
+ *      appends the Try-On button after the form's closing tag.
+ *
+ *   2. Legacy app block — reads data-* attributes from #ai-tryon-widget-root.
  */
 (function () {
   "use strict";
 
-  const root = document.getElementById("ai-tryon-widget-root");
-  if (!root) return;
+  // ─── 1. Read configuration ──────────────────────────────────────────
+  let PRODUCT_ID, GARMENT_URL, APP_URL, SHOP_DOMAIN, CTA_TEXT, PRIMARY_COLOR,
+      SESSION_KEY, INJECTION_SELECTOR, injectionTarget;
 
-  const PRODUCT_ID = root.dataset.productId;
-  const GARMENT_URL = root.dataset.garmentUrl;
-  const APP_URL = (root.dataset.appUrl || "").replace(/\/$/, "");
-  const SHOP_DOMAIN = root.dataset.shopDomain;
-  const CTA_TEXT = root.dataset.ctaText || "Try On";
-  const PRIMARY_COLOR = root.dataset.primaryColor || "#6366f1";
-  const SESSION_KEY = `ai_tryon_result_${PRODUCT_ID}`;
+  const cfg = window.FitlyConfig;
+
+  if (cfg) {
+    // App Embed mode
+    PRODUCT_ID       = cfg.PRODUCT_ID ? String(cfg.PRODUCT_ID) : null;
+    GARMENT_URL      = cfg.GARMENT_URL || null;
+    APP_URL          = (cfg.APP_URL || "").replace(/\/$/, "");
+    SHOP_DOMAIN      = cfg.SHOP_DOMAIN || "";
+    CTA_TEXT         = cfg.CTA_TEXT || "Try On with Fitly";
+    PRIMARY_COLOR    = cfg.PRIMARY_COLOR || "#6366f1";
+    INJECTION_SELECTOR = cfg.INJECTION_SELECTOR || "form[action*='/cart/add']";
+  } else {
+    // Legacy App Block mode
+    const root = document.getElementById("ai-tryon-widget-root");
+    if (!root) return;
+    if (root.dataset.initialized) return;
+    root.dataset.initialized = "true";
+    PRODUCT_ID    = root.dataset.productId;
+    GARMENT_URL   = root.dataset.garmentUrl;
+    APP_URL       = (root.dataset.appUrl || "").replace(/\/$/, "");
+    SHOP_DOMAIN   = root.dataset.shopDomain;
+    CTA_TEXT      = root.dataset.ctaText || "Try On";
+    PRIMARY_COLOR = root.dataset.primaryColor || "#6366f1";
+    injectionTarget = root; // inject button directly into the root element
+  }
+
+  // Deduplicate (widget may be loaded multiple times on SPAs)
+  if (window.__fitlyWidgetInit) return;
+  window.__fitlyWidgetInit = true;
+
+  // In App Embed mode: only show on product page (PRODUCT_ID must be set)
+  if (cfg && !PRODUCT_ID) return;
+
+  SESSION_KEY = `fitly_tryon_result_${PRODUCT_ID}`;
   const POLL_INTERVAL_MS = 2000;
 
-  // ─────────────────────────────────────────────
-  // 1. Mount Shadow DOM
-  // ─────────────────────────────────────────────
-  const shadow = root.attachShadow({ mode: "open" });
 
-  // Inject scoped styles
-  const style = document.createElement("style");
-  style.textContent = getStyles(PRIMARY_COLOR);
-  shadow.appendChild(style);
+  // ─────────────────────────────────────────────
+  // 1. Inject global scoped styles
+  // ─────────────────────────────────────────────
+  const styleId = "ai-tryon-global-styles";
+  if (!document.getElementById(styleId)) {
+    const styleNode = document.createElement("style");
+    styleNode.id = styleId;
+    styleNode.textContent = getStyles(PRIMARY_COLOR);
+    document.head.appendChild(styleNode);
+  }
 
   // ─────────────────────────────────────────────
   // 2. Render: "Try On" trigger button
   // ─────────────────────────────────────────────
   const triggerBtn = document.createElement("button");
-  triggerBtn.className = "tryon-btn";
+  triggerBtn.className = "ai-tryon-btn";
   triggerBtn.setAttribute("aria-label", CTA_TEXT);
   triggerBtn.innerHTML = `
     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"
@@ -42,97 +78,119 @@
     </svg>
     <span>${CTA_TEXT}</span>
   `;
-  shadow.appendChild(triggerBtn);
+
+  // ── Inject trigger button ──────────────────────────────────────────
+  if (cfg) {
+    // App Embed mode: find the Add-to-Cart form and inject after it.
+    // Retries up to 10 times (50ms apart) for themes that render the form late.
+    let attempts = 0;
+    function tryInject() {
+      const form = document.querySelector(INJECTION_SELECTOR);
+      if (form) {
+        form.insertAdjacentElement("afterend", triggerBtn);
+      } else if (++attempts < 10) {
+        setTimeout(tryInject, 50);
+      }
+    }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", tryInject);
+    } else {
+      tryInject();
+    }
+  } else {
+    // Legacy block mode: append into root element
+    injectionTarget.appendChild(triggerBtn);
+  }
 
   // ─────────────────────────────────────────────
   // 3. Modal markup
   // ─────────────────────────────────────────────
   const modal = document.createElement("div");
-  modal.className = "tryon-modal";
+  modal.className = "ai-tryon-modal";
   modal.setAttribute("role", "dialog");
   modal.setAttribute("aria-modal", "true");
   modal.setAttribute("aria-label", "AI Virtual Try-On");
   modal.innerHTML = `
-    <div class="tryon-backdrop"></div>
-    <div class="tryon-sheet">
-      <div class="tryon-header">
-        <span class="tryon-title">AI Virtual Try-On</span>
-        <button class="tryon-close" aria-label="Đóng">✕</button>
+    <div class="ai-tryon-backdrop"></div>
+    <div class="ai-tryon-sheet">
+      <div class="ai-tryon-header">
+        <span class="ai-tryon-title">AI Virtual Try-On</span>
+        <button class="ai-tryon-close" aria-label="Đóng">✕</button>
       </div>
 
-      <div class="tryon-body">
+      <div class="ai-tryon-body">
         <!-- Upload Area -->
-        <div class="tryon-upload-area" id="tryon-upload-area">
-          <div class="tryon-drop-zone" id="tryon-drop-zone">
-            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24"
-                 fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2"/>
-              <circle cx="9" cy="9" r="2"/>
-              <path d="M21 15l-5-5L5 21"/>
-            </svg>
-            <p class="tryon-drop-text">Kéo thả ảnh vào đây<br><span>hoặc</span></p>
-            <label class="tryon-file-label">
-              Chọn ảnh của bạn
-              <input type="file" id="tryon-file-input" accept="image/jpeg,image/png,image/webp,image/heic" hidden>
-            </label>
-            <p class="tryon-hint">JPG / PNG / WEBP / HEIC · Tối đa 20 MB</p>
+        <div class="ai-tryon-upload-area" id="ai-tryon-upload-area">
+          <div class="ai-tryon-drop-zone" id="ai-tryon-drop-zone">
+             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24"
+                  fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                <circle cx="9" cy="9" r="2"/>
+                <path d="M21 15l-5-5L5 21"/>
+             </svg>
+             <p class="ai-tryon-drop-text">Kéo thả ảnh vào đây<br><span>hoặc</span></p>
+             <label class="ai-tryon-file-label">
+                Chọn ảnh của bạn
+                <input type="file" id="ai-tryon-file-input" accept="image/jpeg,image/png,image/webp,image/heic" hidden>
+             </label>
+             <p class="ai-tryon-hint">JPG / PNG / WEBP / HEIC · Tối đa 20 MB</p>
           </div>
-          <div class="tryon-preview-wrap hidden" id="tryon-preview-wrap">
-            <img id="tryon-preview-img" class="tryon-preview-img" alt="Ảnh xem trước" />
-            <button class="tryon-change-photo" id="tryon-change-photo">Đổi ảnh</button>
+          <div class="ai-tryon-preview-wrap ai-tryon-hidden" id="ai-tryon-preview-wrap">
+             <img id="ai-tryon-preview-img" class="ai-tryon-preview-img" alt="Ảnh xem trước" />
+             <button class="ai-tryon-change-photo" id="ai-tryon-change-photo">Đổi ảnh</button>
           </div>
-          <button class="tryon-submit-btn" id="tryon-submit-btn" disabled>
-            Thử ngay 🚀
+          <button class="ai-tryon-submit-btn" id="ai-tryon-submit-btn" disabled>
+             Thử ngay 🚀
           </button>
         </div>
 
         <!-- Processing State -->
-        <div class="tryon-processing hidden" id="tryon-processing">
-          <div class="tryon-spinner"></div>
-          <p class="tryon-processing-text">AI đang xử lý ảnh của bạn…</p>
-          <p class="tryon-processing-sub">Khoảng 10–15 giây</p>
+        <div class="ai-tryon-processing ai-tryon-hidden" id="ai-tryon-processing">
+           <div class="ai-tryon-spinner"></div>
+           <p class="ai-tryon-processing-text">AI đang xử lý ảnh của bạn…</p>
+           <p class="ai-tryon-processing-sub">Khoảng 10–15 giây</p>
         </div>
 
         <!-- Result State -->
-        <div class="tryon-result-area hidden" id="tryon-result-area">
-          <img id="tryon-result-img" class="tryon-result-img" alt="Kết quả Try-On" />
-          <div class="tryon-result-actions">
-            <button class="tryon-retry-btn" id="tryon-retry-btn">Thử lại</button>
-            <a id="tryon-share-btn" class="tryon-share-btn" download="try-on-result.jpg">Tải ảnh</a>
-          </div>
+        <div class="ai-tryon-result-area ai-tryon-hidden" id="ai-tryon-result-area">
+           <img id="ai-tryon-result-img" class="ai-tryon-result-img" alt="Kết quả Try-On" />
+           <div class="ai-tryon-result-actions">
+              <button class="ai-tryon-retry-btn" id="ai-tryon-retry-btn">Thử lại</button>
+              <a id="ai-tryon-share-btn" class="ai-tryon-share-btn" download="try-on-result.jpg">Tải ảnh</a>
+           </div>
         </div>
 
         <!-- Error State -->
-        <div class="tryon-error hidden" id="tryon-error">
-          <p class="tryon-error-text" id="tryon-error-text">Đã xảy ra lỗi.</p>
-          <button class="tryon-retry-btn" id="tryon-error-retry">Thử lại</button>
+        <div class="ai-tryon-error ai-tryon-hidden" id="ai-tryon-error">
+           <p class="ai-tryon-error-text" id="ai-tryon-error-text">Đã xảy ra lỗi.</p>
+           <button class="ai-tryon-retry-btn" id="ai-tryon-error-retry">Thử lại</button>
         </div>
       </div>
     </div>
   `;
-  shadow.appendChild(modal);
+  document.body.appendChild(modal);
 
   // ─────────────────────────────────────────────
   // 4. Element refs
   // ─────────────────────────────────────────────
-  const $ = (id) => shadow.getElementById(id);
-  const backdrop = modal.querySelector(".tryon-backdrop");
-  const closeBtn = modal.querySelector(".tryon-close");
-  const fileInput = $("tryon-file-input");
-  const dropZone = $("tryon-drop-zone");
-  const previewWrap = $("tryon-preview-wrap");
-  const previewImg = $("tryon-preview-img");
-  const changePhoto = $("tryon-change-photo");
-  const submitBtn = $("tryon-submit-btn");
-  const processing = $("tryon-processing");
-  const uploadArea = $("tryon-upload-area");
-  const resultArea = $("tryon-result-area");
-  const resultImg = $("tryon-result-img");
-  const shareBtn = $("tryon-share-btn");
-  const retryBtn = $("tryon-retry-btn");
-  const errorDiv = $("tryon-error");
-  const errorText = $("tryon-error-text");
-  const errorRetry = $("tryon-error-retry");
+  const $ = (id) => document.getElementById(id);
+  const backdrop = modal.querySelector(".ai-tryon-backdrop");
+  const closeBtn = modal.querySelector(".ai-tryon-close");
+  const fileInput = $("ai-tryon-file-input");
+  const dropZone = $("ai-tryon-drop-zone");
+  const previewWrap = $("ai-tryon-preview-wrap");
+  const previewImg = $("ai-tryon-preview-img");
+  const changePhoto = $("ai-tryon-change-photo");
+  const submitBtn = $("ai-tryon-submit-btn");
+  const processing = $("ai-tryon-processing");
+  const uploadArea = $("ai-tryon-upload-area");
+  const resultArea = $("ai-tryon-result-area");
+  const resultImg = $("ai-tryon-result-img");
+  const shareBtn = $("ai-tryon-share-btn");
+  const retryBtn = $("ai-tryon-retry-btn");
+  const errorDiv = $("ai-tryon-error");
+  const errorText = $("ai-tryon-error-text");
+  const errorRetry = $("ai-tryon-error-retry");
 
   let selectedFile = null;
   let pollTimer = null;
@@ -141,7 +199,7 @@
   // 5. Open / close modal
   // ─────────────────────────────────────────────
   function openModal() {
-    modal.classList.add("open");
+    modal.classList.add("ai-tryon-open");
     document.body.style.overflow = "hidden";
 
     // Check sessionStorage cache
@@ -152,7 +210,7 @@
   }
 
   function closeModal() {
-    modal.classList.remove("open");
+    modal.classList.remove("ai-tryon-open");
     document.body.style.overflow = "";
     clearInterval(pollTimer);
   }
@@ -172,8 +230,8 @@
     selectedFile = file;
     const url = URL.createObjectURL(file);
     previewImg.src = url;
-    dropZone.classList.add("hidden");
-    previewWrap.classList.remove("hidden");
+    dropZone.classList.add("ai-tryon-hidden");
+    previewWrap.classList.remove("ai-tryon-hidden");
     submitBtn.disabled = false;
   }
 
@@ -181,8 +239,8 @@
   changePhoto.addEventListener("click", () => {
     fileInput.value = "";
     selectedFile = null;
-    previewWrap.classList.add("hidden");
-    dropZone.classList.remove("hidden");
+    previewWrap.classList.add("ai-tryon-hidden");
+    dropZone.classList.remove("ai-tryon-hidden");
     submitBtn.disabled = true;
   });
 
@@ -272,28 +330,28 @@
   // 9. State display helpers
   // ─────────────────────────────────────────────
   function hideAll() {
-    uploadArea.classList.add("hidden");
-    processing.classList.add("hidden");
-    resultArea.classList.add("hidden");
-    errorDiv.classList.add("hidden");
+    uploadArea.classList.add("ai-tryon-hidden");
+    processing.classList.add("ai-tryon-hidden");
+    resultArea.classList.add("ai-tryon-hidden");
+    errorDiv.classList.add("ai-tryon-hidden");
   }
 
   function showProcessing() {
     hideAll();
-    processing.classList.remove("hidden");
+    processing.classList.remove("ai-tryon-hidden");
   }
 
   function showResult(url) {
     hideAll();
     resultImg.src = url;
     shareBtn.href = url;
-    resultArea.classList.remove("hidden");
+    resultArea.classList.remove("ai-tryon-hidden");
   }
 
   function showError(msg) {
     hideAll();
     errorText.textContent = msg;
-    errorDiv.classList.remove("hidden");
+    errorDiv.classList.remove("ai-tryon-hidden");
   }
 
   function resetToUpload() {
@@ -301,11 +359,11 @@
     selectedFile = null;
     fileInput.value = "";
     previewImg.src = "";
-    previewWrap.classList.add("hidden");
-    dropZone.classList.remove("hidden");
+    previewWrap.classList.add("ai-tryon-hidden");
+    dropZone.classList.remove("ai-tryon-hidden");
     submitBtn.disabled = true;
     hideAll();
-    uploadArea.classList.remove("hidden");
+    uploadArea.classList.remove("ai-tryon-hidden");
   }
 
   retryBtn.addEventListener("click", resetToUpload);
@@ -316,12 +374,10 @@
   // ─────────────────────────────────────────────
   function getStyles(color) {
     return `
-      :host { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-
-      .hidden { display: none !important; }
+      .ai-tryon-hidden { display: none !important; }
 
       /* Trigger button */
-      .tryon-btn {
+      .ai-tryon-btn {
         display: inline-flex;
         align-items: center;
         gap: 8px;
@@ -336,28 +392,30 @@
         transition: opacity 0.2s, transform 0.15s;
         width: 100%;
         justify-content: center;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
-      .tryon-btn:hover { opacity: 0.88; transform: translateY(-1px); }
-      .tryon-btn:active { transform: translateY(0); }
+      .ai-tryon-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+      .ai-tryon-btn:active { transform: translateY(0); }
 
       /* Modal */
-      .tryon-modal {
+      .ai-tryon-modal {
         display: none;
         position: fixed;
-        inset: 0;
-        z-index: 99999;
+        top: 0; left: 0; width: 100vw; height: 100vh;
+        z-index: 2147483647;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       }
-      .tryon-modal.open { display: flex; align-items: flex-end; justify-content: center; }
+      .ai-tryon-modal.ai-tryon-open { display: flex; align-items: flex-end; justify-content: center; }
 
-      .tryon-backdrop {
-        position: absolute;
-        inset: 0;
+      .ai-tryon-backdrop {
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
         background: rgba(0,0,0,0.55);
         backdrop-filter: blur(4px);
-        animation: fadeIn 0.2s ease;
+        animation: ai-tryon-fadeIn 0.2s ease;
       }
 
-      .tryon-sheet {
+      .ai-tryon-sheet {
         position: relative;
         background: #fff;
         border-radius: 20px 20px 0 0;
@@ -365,16 +423,17 @@
         max-width: 540px;
         max-height: 92vh;
         overflow-y: auto;
-        animation: slideUp 0.3s cubic-bezier(0.32,0.72,0,1);
-        z-index: 1;
+        animation: ai-tryon-slideUp 0.3s cubic-bezier(0.32,0.72,0,1);
+        z-index: 10;
+        box-sizing: border-box;
       }
 
       @media (min-width: 600px) {
-        .tryon-modal.open { align-items: center; }
-        .tryon-sheet { border-radius: 20px; max-height: 88vh; }
+        .ai-tryon-modal.ai-tryon-open { align-items: center; }
+        .ai-tryon-sheet { border-radius: 20px; max-height: 88vh; }
       }
 
-      .tryon-header {
+      .ai-tryon-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -383,10 +442,10 @@
         position: sticky;
         top: 0;
         background: #fff;
-        z-index: 2;
+        z-index: 11;
       }
-      .tryon-title { font-size: 17px; font-weight: 700; color: #111; }
-      .tryon-close {
+      .ai-tryon-title { font-size: 17px; font-weight: 700; color: #111; margin: 0; }
+      .ai-tryon-close {
         background: #f5f5f5;
         border: none;
         border-radius: 50%;
@@ -395,26 +454,29 @@
         font-size: 16px;
         display: flex; align-items: center; justify-content: center;
         transition: background 0.15s;
+        padding: 0; margin: 0;
+        color: #111;
       }
-      .tryon-close:hover { background: #e8e8e8; }
+      .ai-tryon-close:hover { background: #e8e8e8; }
 
-      .tryon-body { padding: 20px; }
+      .ai-tryon-body { padding: 20px; }
 
       /* Upload area */
-      .tryon-drop-zone {
+      .ai-tryon-drop-zone {
         border: 2px dashed #d0d0d0;
         border-radius: 14px;
         padding: 32px 20px;
         text-align: center;
         cursor: pointer;
         transition: border-color 0.2s, background 0.2s;
+        box-sizing: border-box;
       }
-      .tryon-drop-zone.drag-over { border-color: ${color}; background: ${color}18; }
-      .tryon-drop-zone svg { color: #aaa; margin-bottom: 12px; }
-      .tryon-drop-text { color: #555; font-size: 14px; margin: 8px 0; }
-      .tryon-drop-text span { color: #999; }
-      .tryon-hint { font-size: 12px; color: #bbb; margin-top: 8px; }
-      .tryon-file-label {
+      .ai-tryon-drop-zone.drag-over { border-color: ${color}; background: ${color}18; }
+      .ai-tryon-drop-zone svg { color: #aaa; margin-bottom: 12px; }
+      .ai-tryon-drop-text { color: #555; font-size: 14px; margin: 8px 0; }
+      .ai-tryon-drop-text span { color: #999; }
+      .ai-tryon-hint { font-size: 12px; color: #bbb; margin-top: 8px; }
+      .ai-tryon-file-label {
         display: inline-block;
         padding: 8px 20px;
         background: ${color};
@@ -426,17 +488,17 @@
         margin: 8px 0;
         transition: opacity 0.2s;
       }
-      .tryon-file-label:hover { opacity: 0.88; }
+      .ai-tryon-file-label:hover { opacity: 0.88; }
 
       /* Preview */
-      .tryon-preview-wrap { text-align: center; margin-bottom: 12px; }
-      .tryon-preview-img {
+      .ai-tryon-preview-wrap { text-align: center; margin-bottom: 12px; }
+      .ai-tryon-preview-img {
         max-height: 220px;
         border-radius: 12px;
         object-fit: cover;
         box-shadow: 0 4px 16px rgba(0,0,0,0.1);
       }
-      .tryon-change-photo {
+      .ai-tryon-change-photo {
         display: block;
         margin: 10px auto 0;
         background: none;
@@ -445,10 +507,11 @@
         font-size: 13px;
         cursor: pointer;
         text-decoration: underline;
+        padding: 0;
       }
 
       /* Submit button */
-      .tryon-submit-btn {
+      .ai-tryon-submit-btn {
         width: 100%;
         padding: 14px;
         background: ${color};
@@ -460,41 +523,43 @@
         cursor: pointer;
         margin-top: 16px;
         transition: opacity 0.2s;
+        box-sizing: border-box;
       }
-      .tryon-submit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-      .tryon-submit-btn:not(:disabled):hover { opacity: 0.88; }
+      .ai-tryon-submit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+      .ai-tryon-submit-btn:not(:disabled):hover { opacity: 0.88; }
 
       /* Processing */
-      .tryon-processing { text-align: center; padding: 40px 20px; }
-      .tryon-spinner {
+      .ai-tryon-processing { text-align: center; padding: 40px 20px; }
+      .ai-tryon-spinner {
         width: 48px; height: 48px;
         border: 4px solid #f0f0f0;
         border-top-color: ${color};
         border-radius: 50%;
-        animation: spin 0.9s linear infinite;
+        animation: ai-tryon-spin 0.9s linear infinite;
         margin: 0 auto 20px;
       }
-      .tryon-processing-text { font-size: 16px; font-weight: 600; color: #222; }
-      .tryon-processing-sub { font-size: 13px; color: #888; margin-top: 6px; }
+      .ai-tryon-processing-text { font-size: 16px; font-weight: 600; color: #222; margin: 0 0 6px; }
+      .ai-tryon-processing-sub { font-size: 13px; color: #888; margin: 0; }
 
       /* Result */
-      .tryon-result-area { text-align: center; }
-      .tryon-result-img {
+      .ai-tryon-result-area { text-align: center; }
+      .ai-tryon-result-img {
         max-width: 100%;
         max-height: 380px;
         border-radius: 14px;
         object-fit: contain;
         box-shadow: 0 8px 24px rgba(0,0,0,0.12);
       }
-      .tryon-result-actions {
+      .ai-tryon-result-actions {
         display: flex;
         gap: 12px;
         margin-top: 16px;
         justify-content: center;
       }
-      .tryon-retry-btn {
+      .ai-tryon-retry-btn {
         padding: 10px 24px;
         background: #f5f5f5;
+        color: #111;
         border: none;
         border-radius: 8px;
         font-size: 14px;
@@ -502,8 +567,8 @@
         cursor: pointer;
         transition: background 0.15s;
       }
-      .tryon-retry-btn:hover { background: #e8e8e8; }
-      .tryon-share-btn {
+      .ai-tryon-retry-btn:hover { background: #e8e8e8; }
+      .ai-tryon-share-btn {
         padding: 10px 24px;
         background: ${color};
         color: #fff;
@@ -512,25 +577,27 @@
         font-weight: 600;
         text-decoration: none;
         transition: opacity 0.2s;
+        display: inline-flex; align-items: center; justify-content: center;
       }
-      .tryon-share-btn:hover { opacity: 0.88; }
+      .ai-tryon-share-btn:hover { opacity: 0.88; }
 
       /* Error */
-      .tryon-error { text-align: center; padding: 32px 20px; }
-      .tryon-error-text { color: #c0392b; font-size: 15px; margin-bottom: 16px; }
+      .ai-tryon-error { text-align: center; padding: 32px 20px; }
+      .ai-tryon-error-text { color: #c0392b; font-size: 15px; margin-bottom: 16px; }
 
       /* Animations */
-      @keyframes slideUp {
+      @keyframes ai-tryon-slideUp {
         from { transform: translateY(60px); opacity: 0; }
         to   { transform: translateY(0);    opacity: 1; }
       }
-      @keyframes fadeIn {
+      @keyframes ai-tryon-fadeIn {
         from { opacity: 0; }
         to   { opacity: 1; }
       }
-      @keyframes spin {
+      @keyframes ai-tryon-spin {
         to { transform: rotate(360deg); }
       }
     `;
   }
+
 })();

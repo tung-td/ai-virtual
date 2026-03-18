@@ -1,104 +1,122 @@
-import { createRequire } from "module";
-import { join } from "path";
+/**
+ * database.js — MySQL connection pool via mysql2/promise.
+ *
+ * DATABASE_URL is read lazily inside initDatabase() so that dotenv.config()
+ * has already executed by the time we check process.env.
+ *
+ * Usage:
+ *   1. Call `await initDatabase()` in index.js after dotenv.config()
+ *   2. Import `pool` anywhere else for query execution
+ *
+ * Add to .env:
+ *   DATABASE_URL=mysql://user:pass@localhost:3306/fitly_db
+ */
+import mysql from "mysql2/promise";
 
-const require = createRequire(import.meta.url);
+// pool is populated by initDatabase()
+let pool = null;
 
-// Use better-sqlite3 for synchronous DB access (simpler in Express handlers)
-// Falls back to a mock if the module is not installed, so the server still starts.
-let Database;
-try {
-  Database = require("better-sqlite3");
-} catch {
-  console.warn(
-    "[database.js] better-sqlite3 not found — running in mock mode. Install it: npm install better-sqlite3",
-  );
-}
+/**
+ * Initialize the MySQL pool and run DDL migrations.
+ * Must be called AFTER dotenv.config() — typically in web/index.js.
+ * Safe to call multiple times (no-op after first successful call).
+ */
+export async function initDatabase() {
+  if (pool) return pool;
 
-const DB_PATH = join(process.cwd(), "database.sqlite");
+  const DATABASE_URL = process.env.DATABASE_URL;
 
-let db;
+  if (!DATABASE_URL || DATABASE_URL.includes("user:password") || DATABASE_URL.includes("user:pass@host")) {
+    console.warn(
+      "[database.js] DATABASE_URL not configured — running in mock mode. " +
+      "Add DATABASE_URL=mysql://root:@127.0.0.1:3306/fitly_db to .env",
+    );
+    // Mock pool — all queries return empty results so the app doesn't crash
+    pool = {
+      execute: async () => [[null], []],
+      query:   async () => [[null], []],
+    };
+    return pool;
+  }
 
-if (Database) {
-  db = new Database(DB_PATH);
-  // Enable WAL mode for better concurrent read performance
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  runMigrations(db);
-} else {
-  // Mock db — methods are no-ops so the rest of the app can load
-  db = {
-    prepare: () => ({
-      run: () => {},
-      get: () => null,
-      all: () => [],
-    }),
-    exec: () => {},
-  };
+  try {
+    pool = mysql.createPool(DATABASE_URL);
+    console.log("[database.js] MySQL pool created ✓");
+    await runMigrations();
+  } catch (err) {
+    console.error("[database.js] Failed to connect to MySQL:", err.message);
+    console.warn("[database.js] Falling back to mock mode.");
+    pool = {
+      execute: async () => [[null], []],
+      query:   async () => [[null], []],
+    };
+  }
+
+  return pool;
 }
 
 /**
- * Run all DDL migrations (idempotent — uses IF NOT EXISTS).
- * Add new migrations here as new tables are needed.
- * @param {import("better-sqlite3").Database} database
+ * Proxy getter — returns the current pool (or mock if not yet initialized).
+ * Modules that import `pool` directly will get this proxy.
  */
-function runMigrations(database) {
-  database.exec(`
-    -- -------------------------------------------------------
-    -- shops: one row per installed store
-    -- -------------------------------------------------------
+const poolProxy = new Proxy(
+  {},
+  {
+    get(_target, prop) {
+      if (!pool) {
+        throw new Error(
+          "[database.js] Pool not initialized. Call initDatabase() first.",
+        );
+      }
+      return pool[prop];
+    },
+  },
+);
+
+/**
+ * Run all DDL migrations (idempotent — IF NOT EXISTS).
+ */
+async function runMigrations() {
+  await pool.execute(`
     CREATE TABLE IF NOT EXISTS shops (
-      id              INTEGER PRIMARY KEY AUTOINCREMENT,
-      shop            TEXT    UNIQUE NOT NULL,
-      plan            TEXT    NOT NULL DEFAULT 'free',
-      quota_used      INTEGER NOT NULL DEFAULT 0,
-      quota_limit     INTEGER NOT NULL DEFAULT 20,
-      overage_enabled INTEGER NOT NULL DEFAULT 1,  -- 1 = on, 0 = off
-      ai_engine       TEXT    NOT NULL DEFAULT 'premium', -- premium | community | mock
-      widget_config   TEXT    NOT NULL DEFAULT '{}', -- JSON blob
-      created_at      TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at      TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- -------------------------------------------------------
-    -- tryon_jobs: audit log for every try-on generation
-    -- -------------------------------------------------------
-    CREATE TABLE IF NOT EXISTS tryon_jobs (
-      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-      shop                 TEXT    NOT NULL,
-      product_id           TEXT,
-      fashn_prediction_id  TEXT,
-      status               TEXT    NOT NULL DEFAULT 'pending', -- pending | processing | done | failed
-      result_url           TEXT,
-      error                TEXT,
-      counted              INTEGER NOT NULL DEFAULT 0,         -- 1 if this job consumed quota
-      created_at           TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at           TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- Index for fast quota count queries
-    CREATE INDEX IF NOT EXISTS idx_tryon_jobs_shop_created
-      ON tryon_jobs(shop, created_at);
+      id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      shop            VARCHAR(255) UNIQUE NOT NULL,
+      plan            VARCHAR(50)  NOT NULL DEFAULT 'free',
+      quota_used      INT          NOT NULL DEFAULT 0,
+      quota_limit     INT          NOT NULL DEFAULT 20,
+      overage_enabled TINYINT(1)   NOT NULL DEFAULT 1,
+      ai_engine       VARCHAR(50)  NOT NULL DEFAULT 'gemini',
+      widget_config   JSON,
+      created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
   `);
 
-  // Safe migration: add columns to existing databases
-  try {
-    database.exec(
-      `ALTER TABLE shops ADD COLUMN ai_engine TEXT NOT NULL DEFAULT 'premium';`,
-    );
-  } catch {
-    // Column already exists
-  }
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS tryon_jobs (
+      id                   BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      shop                 VARCHAR(255) NOT NULL,
+      product_id           VARCHAR(255),
+      fashn_prediction_id  VARCHAR(255),
+      status               VARCHAR(50)  NOT NULL DEFAULT 'pending',
+      result_url           LONGTEXT,
+      error                TEXT,
+      counted              TINYINT(1)   NOT NULL DEFAULT 0,
+      created_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at           DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_shop_created (shop, created_at)
+    )
+  `);
 
-  try {
-    database.exec(
-      `ALTER TABLE tryon_jobs ADD COLUMN fashn_prediction_id TEXT;`,
-    );
-  } catch {
-    // Column already exists — ignore
-  }
+  // Upgrade existing result_url column from TEXT → LONGTEXT if needed
+  // (safe to run multiple times — MySQL ignores it if already LONGTEXT)
+  await pool.execute(`
+    ALTER TABLE tryon_jobs
+    MODIFY COLUMN result_url LONGTEXT
+  `).catch(() => {}); // ignore if table doesn't exist yet
 
   console.log("[database.js] Migrations applied ✓");
 }
 
-export { db };
-export default db;
+export { poolProxy as pool };
+export default poolProxy;

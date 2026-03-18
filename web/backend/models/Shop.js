@@ -1,79 +1,63 @@
-import db from "../config/database.js";
+import pool from "../config/database.js";
 import { BILLING_PLANS } from "../config/shopify.js";
 
 /**
  * Shop Model — manages the `shops` table.
- * One row per installed Shopify store.
+ * All methods are async (MySQL pool uses Promises).
  */
 const Shop = {
   /**
    * Find a shop by its domain.
-   * @param {string} shop - e.g. "mystore.myshopify.com"
-   * @returns {object|null}
+   * @param {string} shop
+   * @returns {Promise<object|null>}
    */
-  findByDomain(shop) {
-    return db.prepare("SELECT * FROM shops WHERE shop = ?").get(shop);
+  async findByDomain(shop) {
+    const [rows] = await pool.execute(
+      "SELECT * FROM shops WHERE shop = ? LIMIT 1",
+      [shop],
+    );
+    return rows[0] ?? null;
   },
 
   /**
-   * Create or update a shop record.
-   * Called on OAuth callback (install/reinstall).
+   * Create or update a shop record (called on OAuth install/reinstall).
    * @param {object} data
-   * @param {string} data.shop
-   * @param {string} [data.plan]
-   * @param {number} [data.quota_limit]
-   * @param {number} [data.overage_enabled]
-   * @param {string} [data.widget_config]
    */
-  upsert({
-    shop,
-    plan = "free",
-    quota_limit,
-    overage_enabled = 1,
-    widget_config = "{}",
-  }) {
+  async upsert({ shop, plan = "free", quota_limit, overage_enabled = 1, widget_config = "{}" }) {
     const limit = quota_limit ?? BILLING_PLANS[plan]?.quotaLimit ?? 20;
-    db.prepare(
-      `
-      INSERT INTO shops (shop, plan, quota_limit, overage_enabled, widget_config, updated_at)
-      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(shop) DO UPDATE SET
-        updated_at = CURRENT_TIMESTAMP
-    `,
-    ).run(shop, plan, limit, overage_enabled, widget_config);
+    await pool.execute(
+      `INSERT INTO shops (shop, plan, quota_limit, overage_enabled, widget_config)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE updated_at = NOW()`,
+      [shop, plan, limit, overage_enabled, widget_config],
+    );
     return Shop.findByDomain(shop);
   },
 
   /**
    * Update shop plan and reset quota limits.
    * @param {string} shop
-   * @param {string} plan - key from BILLING_PLANS
+   * @param {string} plan
    */
-  updatePlan(shop, plan) {
+  async updatePlan(shop, plan) {
     const planConfig = BILLING_PLANS[plan];
     if (!planConfig) throw new Error(`Unknown plan: ${plan}`);
-    db.prepare(
-      `
-      UPDATE shops
-      SET plan = ?, quota_limit = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE shop = ?
-    `,
-    ).run(plan, planConfig.quotaLimit, shop);
+    await pool.execute(
+      `UPDATE shops SET plan = ?, quota_limit = ? WHERE shop = ?`,
+      [plan, planConfig.quotaLimit, shop],
+    );
   },
 
   /**
-   * Update widget config (colors, CTA text, etc.)
+   * Update widget config JSON.
    * @param {string} shop
    * @param {object} config
    */
-  updateWidgetConfig(shop, config) {
-    db.prepare(
-      `
-      UPDATE shops
-      SET widget_config = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE shop = ?
-    `,
-    ).run(JSON.stringify(config), shop);
+  async updateWidgetConfig(shop, config) {
+    await pool.execute(
+      `UPDATE shops SET widget_config = ? WHERE shop = ?`,
+      [JSON.stringify(config), shop],
+    );
   },
 
   /**
@@ -81,57 +65,33 @@ const Shop = {
    * @param {string} shop
    * @param {boolean} enabled
    */
-  setOverage(shop, enabled) {
-    db.prepare(
-      `
-      UPDATE shops
-      SET overage_enabled = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE shop = ?
-    `,
-    ).run(enabled ? 1 : 0, shop);
+  async setOverage(shop, enabled) {
+    await pool.execute(
+      `UPDATE shops SET overage_enabled = ? WHERE shop = ?`,
+      [enabled ? 1 : 0, shop],
+    );
   },
 
   /**
-   * Increment quota_used by 1. Called after each successful generation.
+   * Increment quota_used by 1.
    * @param {string} shop
    */
-  incrementQuota(shop) {
-    db.prepare(
-      `
-      UPDATE shops
-      SET quota_used = quota_used + 1, updated_at = CURRENT_TIMESTAMP
-      WHERE shop = ?
-    `,
-    ).run(shop);
+  async incrementQuota(shop) {
+    await pool.execute(
+      `UPDATE shops SET quota_used = quota_used + 1 WHERE shop = ?`,
+      [shop],
+    );
   },
 
   /**
-   * Set AI Engine preference.
-   * @param {string} shop
-   * @param {string} engine - "premium" | "community" | "mock"
-   */
-  setAiEngine(shop, engine) {
-    db.prepare(
-      `
-      UPDATE shops
-      SET ai_engine = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE shop = ?
-    `,
-    ).run(engine, shop);
-  },
-
-  /**
-   * Reset monthly quota (called by a monthly cron job).
+   * Reset monthly quota.
    * @param {string} shop
    */
-  resetMonthlyQuota(shop) {
-    db.prepare(
-      `
-      UPDATE shops
-      SET quota_used = 0, updated_at = CURRENT_TIMESTAMP
-      WHERE shop = ?
-    `,
-    ).run(shop);
+  async resetMonthlyQuota(shop) {
+    await pool.execute(
+      `UPDATE shops SET quota_used = 0 WHERE shop = ?`,
+      [shop],
+    );
   },
 };
 

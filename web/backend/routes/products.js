@@ -1,16 +1,19 @@
-
 import { Router } from "express";
 import {
   listProducts,
-  setTryOnEnabled,
+  setProductEnabled,
+  getProductMeta,
 } from "../controllers/productController.js";
 
 const router = Router();
 
-// GET  /api/products          — list products with tryon metafield status
+// GET  /api/products       — list products with fitly metafield status (supports search, tag, type, cursor)
 router.get("/", listProducts);
 
-// POST /api/products/:id/tryon — enable/disable tryon for a product
-router.post("/:id/tryon", setTryOnEnabled);
+// GET  /api/products/meta  — filter options (product types + top tags)
+router.get("/meta", getProductMeta);
+
+// PUT  /api/products/fitly-enabled — set per-product fitly enable/disable metafield
+router.put("/fitly-enabled", setProductEnabled);
 
 export default router;
